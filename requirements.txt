@@ -1,0 +1,26 @@
+# MiraeVaani 2.0 — Laptop/Docker dependencies (CPU only, no GPU needed)
+
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+websockets==13.1
+
+# Twilio
+twilio==9.3.7
+
+# HTTP client (for calling Colab services)
+httpx==0.28.0
+
+# Audio processing (CPU — resampling, mulaw encoding)
+numpy==1.26.4
+scipy==1.14.1
+
+# Silero VAD (local voice activity detection)
+torch==2.4.1          # CPU-only torch for VAD
+torchaudio==2.4.1
+
+# Settings
+pydantic-settings==2.6.1
+pydantic==2.10.3
+python-dotenv==1.0.1
