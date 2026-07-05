@@ -24,3 +24,6 @@ torchaudio==2.4.1
 pydantic-settings==2.6.1
 pydantic==2.10.3
 python-dotenv==1.0.1
+
+# Env encryption (for sharing via GitHub)
+cryptography>=42.0
