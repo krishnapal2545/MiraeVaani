@@ -98,9 +98,59 @@ Add new scenarios in `app/prompts.py`.
 - **Turn detection:** tune `SILENCE_THRESHOLD_RMS` (noise floor) and `SILENCE_END_SECONDS` (pause that ends a turn) in `.env`.
 - **Default language:** `DEFAULT_LANGUAGE` is used for the greeting before the caller's language is detected.
 
-## Cost (approx., per 5-minute call, excluding Twilio minutes)
+## Cost Breakdown (2026 pricing, per 5-minute call)
 
-- STT: ₹2.5–7 · LLM: ~₹1 · TTS: ~₹13 → **≈ ₹17–21/call**
+### API unit rates (as of August 2026)
+
+| Service | Provider | Rate | Unit | Source |
+|---------|----------|------|------|--------|
+| **STT** | Sarvam Saarika | ₹30 | per hour of audio (₹0.50/min) | [sarvam.ai/api-pricing](https://www.sarvam.ai/api-pricing) |
+| **TTS (Bulbul v2)** | Sarvam Bulbul v2 | ₹15 | per 10K characters | [sarvam.ai/api-pricing](https://www.sarvam.ai/api-pricing) |
+| **TTS (Bulbul v3)** | Sarvam Bulbul v3 | ₹30 | per 10K characters | [sarvam.ai/api-pricing](https://www.sarvam.ai/api-pricing) |
+| **LLM** | Gemini 2.5 Flash-Lite | $0.10 / ₹8.50 | per 1M input tokens | [Google AI pricing](https://ai.google.dev/pricing) |
+| **LLM** | Gemini 2.5 Flash-Lite | $0.40 / ₹34 | per 1M output tokens | [Google AI pricing](https://ai.google.dev/pricing) |
+| **Telephony (outbound mobile)** | Twilio India | $0.0496 / ₹4.20 | per minute | [twilio.com/voice/pricing/in](https://www.twilio.com/en-us/voice/pricing/in) |
+| **Telephony (outbound landline)** | Twilio India | $0.0699 / ₹5.95 | per minute | [twilio.com/voice/pricing/in](https://www.twilio.com/en-us/voice/pricing/in) |
+
+> USD → INR conversion used: ₹85 (approximate mid-2026 rate).
+
+### Assumptions for a 5-minute call
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Call duration | 5 minutes | |
+| Turns (back-and-forth) | ~12 | Agent greeting + ~11 caller/agent exchanges |
+| Caller speaks | ~2.5 min total | ~50% of call time |
+| Agent speaks | ~2.5 min total | ~50% of call time |
+| Agent reply length | ~60 chars/turn | Short spoken Hindi/English sentences |
+| Total agent text | ~720 chars | 12 turns x 60 chars |
+| LLM input tokens/turn | ~350 | System prompt (~250 first turn, cached) + history + user utterance |
+| LLM output tokens/turn | ~40 | 1-2 short spoken sentences |
+| Total LLM input tokens | ~4,200 | 12 turns (with growing history) |
+| Total LLM output tokens | ~480 | 12 turns x 40 |
+
+### Per-call cost calculation
+
+| Component | Calculation | Cost (₹) |
+|-----------|-------------|----------|
+| **Sarvam STT** | 2.5 min x ₹0.50/min | **₹1.25** |
+| **Gemini LLM (input)** | 4,200 tokens x ₹8.50/1M | **₹0.04** |
+| **Gemini LLM (output)** | 480 tokens x ₹34/1M | **₹0.02** |
+| **Sarvam TTS (Bulbul v2)** | 720 chars x ₹15/10K | **₹1.08** |
+| **Sarvam TTS (Bulbul v3)** | 720 chars x ₹30/10K | **₹2.16** |
+| **Twilio (outbound mobile)** | 5 min x ₹4.20/min | **₹21.00** |
+| | | |
+| **TOTAL with Bulbul v2** | STT + LLM + TTS v2 + Twilio | **≈ ₹23.39** |
+| **TOTAL with Bulbul v3** | STT + LLM + TTS v3 + Twilio | **≈ ₹24.47** |
+| **AI-only (excl. Twilio)** | STT + LLM + TTS v2 | **≈ ₹2.39** |
+
+### Key takeaways
+
+- **Twilio telephony dominates the cost** (~₹21 of ~₹23 per call = ~90%). The AI stack (STT + LLM + TTS) is remarkably cheap at **₹2–3 per 5-min call**.
+- **Gemini Flash-Lite is almost free** at ₹0.06 per call — the cheapest component by far.
+- **Sarvam Bulbul v2 vs v3**: v2 is half the price (₹15 vs ₹30 per 10K chars). For production calls where voice quality matters, v3 is worth the ₹1 extra per call.
+- **At scale (10,000 calls/month)**: ~₹2.3–2.5 lakh/month total, of which ~₹2.1 lakh is Twilio. Consider Indian telephony providers (Exotel, Plivo) which charge ₹0.80–1.20/min for India mobile, potentially saving 40–60% on telephony.
+- **Free tier**: Sarvam gives ₹1,000 free credits (~33 hrs STT or ~650K TTS chars). Gemini gives $300 free. Enough for ~400+ test calls.
 
 ## Production roadmap
 
