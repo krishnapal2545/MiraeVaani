@@ -26,7 +26,7 @@ except ImportError:
 
 ENV_FILE = ".env"
 ENCRYPTED_FILE = ".env.encrypted"
-SALT = b"MiraeVaani2.0_salt_v1"  # Fixed salt (safe since password is strong)
+SALT = b"MiraeVaani4.0_salt_v1"  # Fixed salt (safe since password is strong)
 
 
 def _get_key(password: str) -> bytes:

@@ -1,54 +1,58 @@
-"""MiraeVaani 2.0 — FastAPI application entry point."""
+"""MiraeVaani 4.0 — FastAPI entry point.
+
+Pipeline: Twilio Media Streams <-> Sarvam Saarika STT -> Gemini 2.5 Flash-Lite -> Sarvam Bulbul TTS
+"""
 
 import logging
-from html import escape as xml_escape
-from urllib.parse import urlencode
+import uuid
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response
 
-from app.call_handler import CallHandler
+from app.asr import SarvamSTT
+from app.call_handler import CallSession
 from app.call_manager import CallManager
 from app.config import get_settings
-from app.llm import DialogEngine
-from app.prompts import get_prompt
+from app.tts import SarvamTTS
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 settings = get_settings()
 logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
+# In-memory call context store (POC — use Redis in production).
+CALL_CONTEXTS: dict[str, dict] = {}
+
+# Shared API clients (connection pooling across calls).
+stt_client: SarvamSTT | None = None
+tts_client: SarvamTTS | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global stt_client, tts_client
+    stt_client = SarvamSTT()
+    tts_client = SarvamTTS()
+    logger.info("Sarvam clients initialized. BASE_URL=%s", settings.BASE_URL)
+    yield
+    await stt_client.close()
+    await tts_client.close()
+
+
 app = FastAPI(
-    title="MiraeVaani 2.0",
-    description="AI Voice Agent — Open Source Stack (Whisper + Ollama + XTTS)",
-    version="2.0.0",
+    title="MiraeVaani 4.0",
+    description="Multilingual AI voice agent (Sarvam + Gemini + Twilio)",
+    version="4.0.0",
+    lifespan=lifespan,
 )
 
-# In-memory stores (use Redis in production)
-active_calls: dict[str, dict] = {}
-dialog_sessions: dict[str, DialogEngine] = {}
 
-
-# ---------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "service": "MiraeVaani 2.0",
-        "stt_url": settings.STT_BASE_URL or "NOT CONFIGURED",
-        "llm_url": settings.LLM_BASE_URL or "NOT CONFIGURED",
-        "tts_url": settings.TTS_BASE_URL or "NOT CONFIGURED",
-    }
+    return {"status": "ok", "service": "MiraeVaani 4.0"}
 
 
 # ---------------------------------------------------------------------------
@@ -56,169 +60,107 @@ async def health():
 # ---------------------------------------------------------------------------
 @app.post("/api/call")
 async def initiate_call(request: Request):
-    """
-    Initiate an outbound call.
+    """Initiate an outbound call.
 
-    Body JSON example:
+    Body JSON:
     {
         "to": "+919876543210",
         "scenario": "margin_shortfall",
         "customer_name": "Rajesh Kumar",
         "metadata": {
             "account_id": "SHA123456",
-            "shortfall_amount": "50000",
-            "deadline": "2 July 2025, 3:30 PM"
+            "shortfall_amount": "50000 rupees",
+            "deadline": "30 June, 3:30 PM"
         }
     }
     """
     body = await request.json()
     to_number = body.get("to")
-    scenario = body.get("scenario", "margin_shortfall")
-    customer_name = body.get("customer_name", "Customer")
-    metadata = body.get("metadata", {})
-
     if not to_number:
         return JSONResponse(status_code=400, content={"error": "Missing 'to' phone number"})
 
-    try:
-        manager = CallManager()
-        call_sid = manager.initiate_call(
-            to_number=to_number,
-            scenario=scenario,
-            customer_name=customer_name,
-            metadata=metadata,
-        )
-        active_calls[call_sid] = {
-            "scenario": scenario,
-            "customer_name": customer_name,
-            "metadata": metadata,
-        }
-        return {"call_sid": call_sid, "status": "initiated"}
+    call_id = uuid.uuid4().hex
+    CALL_CONTEXTS[call_id] = {
+        "scenario": body.get("scenario", "margin_shortfall"),
+        "customer_name": body.get("customer_name", "Customer"),
+        **(body.get("metadata") or {}),
+    }
 
+    try:
+        call_sid = CallManager().initiate_call(to_number=to_number, call_id=call_id)
+        return {"call_sid": call_sid, "call_id": call_id, "status": "initiated"}
     except Exception as e:
+        CALL_CONTEXTS.pop(call_id, None)
         logger.exception("Failed to initiate call")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ---------------------------------------------------------------------------
-# Twilio voice webhook — returns TwiML to open a Media Stream WebSocket
+# Twilio webhooks
 # ---------------------------------------------------------------------------
 @app.post("/api/twilio/voice")
 async def twilio_voice_webhook(request: Request):
+    """Returns TwiML connecting the call to our bidirectional media stream.
+
+    Outbound calls carry ?call_id=...; inbound calls (no call_id) get the
+    generic inbound support scenario.
     """
-    Twilio hits this when the call connects.
-    We return TwiML that opens a bidirectional Media Stream WebSocket
-    so we can pipe audio through our VAD → ASR → LLM → TTS pipeline.
-    """
-    scenario = request.query_params.get("scenario", "margin_shortfall")
-    customer_name = request.query_params.get("customer_name", "Customer")
-    account_id = request.query_params.get("account_id", "N/A")
-    shortfall_amount = request.query_params.get("shortfall_amount", "N/A")
-    deadline = request.query_params.get("deadline", "N/A")
-    expiry_date = request.query_params.get("expiry_date", "N/A")
-
-    form = await request.form()
-    call_sid = form.get("CallSid", "unknown")
-
-    # Build WebSocket URL for the media stream
-    base_url = settings.BASE_URL.rstrip("/")
-    ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://")
-
-    ws_params = urlencode({
-        "scenario": scenario,
-        "customer_name": customer_name,
-        "account_id": account_id,
-        "shortfall_amount": shortfall_amount,
-        "deadline": deadline,
-        "expiry_date": expiry_date,
-        "call_sid": call_sid,
-    })
-    ws_url = f"{ws_base}/api/twilio/media-stream?{ws_params}"
+    call_id = request.query_params.get("call_id", "")
+    ws_url = (
+        settings.BASE_URL.rstrip("/")
+        .replace("https://", "wss://")
+        .replace("http://", "ws://")
+        + "/api/twilio/media-stream"
+    )
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{xml_escape(ws_url)}" />
+        <Stream url="{ws_url}">
+            <Parameter name="call_id" value="{call_id}"/>
+        </Stream>
     </Connect>
 </Response>"""
-
-    logger.info(
-        "Voice webhook: scenario=%s customer=%s call_sid=%s",
-        scenario,
-        customer_name,
-        call_sid,
-    )
     return Response(content=twiml, media_type="application/xml")
 
 
-# ---------------------------------------------------------------------------
-# Twilio Media Stream WebSocket — real-time bidirectional audio
-# ---------------------------------------------------------------------------
-@app.websocket("/api/twilio/media-stream")
-async def twilio_media_stream(websocket: WebSocket):
-    """
-    Bidirectional WebSocket for Twilio Media Streams.
-    Receives raw mulaw audio from Twilio and sends back synthesized speech.
-    """
-    await websocket.accept()
-
-    scenario = websocket.query_params.get("scenario", "margin_shortfall")
-    customer_name = websocket.query_params.get("customer_name", "Customer")
-    account_id = websocket.query_params.get("account_id", "N/A")
-    shortfall_amount = websocket.query_params.get("shortfall_amount", "N/A")
-    deadline = websocket.query_params.get("deadline", "N/A")
-    expiry_date = websocket.query_params.get("expiry_date", "N/A")
-    call_sid = websocket.query_params.get("call_sid", "unknown")
-
-    system_prompt = get_prompt(
-        scenario,
-        customer_name=customer_name,
-        account_id=account_id,
-        shortfall_amount=shortfall_amount,
-        deadline=deadline,
-        expiry_date=expiry_date,
-    )
-
-    logger.info(
-        "Media stream connected: scenario=%s customer=%s call=%s",
-        scenario,
-        customer_name,
-        call_sid,
-    )
-
-    dialog_engine = DialogEngine(system_prompt=system_prompt)
-    handler = CallHandler(websocket=websocket, dialog_engine=dialog_engine)
-
-    try:
-        await handler.handle()
-    except WebSocketDisconnect:
-        logger.info("Media stream WebSocket disconnected: call=%s", call_sid)
-    except Exception:
-        logger.exception("Media stream error: call=%s", call_sid)
-    finally:
-        active_calls.pop(call_sid, None)
-
-
-# ---------------------------------------------------------------------------
-# Twilio status callback
-# ---------------------------------------------------------------------------
 @app.post("/api/twilio/status")
 async def twilio_status_callback(request: Request):
-    """Receive call status updates from Twilio."""
     form = await request.form()
-    call_sid = form.get("CallSid", "")
-    call_status = form.get("CallStatus", "")
-    logger.info("Call status: SID=%s status=%s", call_sid, call_status)
-
-    if call_status in ("completed", "failed", "busy", "no-answer"):
-        active_calls.pop(call_sid, None)
-
+    logger.info(
+        "Call status: sid=%s status=%s",
+        form.get("CallSid", ""), form.get("CallStatus", ""),
+    )
     return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
-# Active calls listing (debug)
+# Twilio Media Stream WebSocket
 # ---------------------------------------------------------------------------
-@app.get("/api/calls")
-async def list_active_calls():
-    return {"active_calls": active_calls}
+def _resolve_context(call_id: str | None) -> dict:
+    if call_id and call_id in CALL_CONTEXTS:
+        return CALL_CONTEXTS.pop(call_id)
+    return {"scenario": "inbound", "customer_name": "Customer"}
+
+
+@app.websocket("/api/twilio/media-stream")
+async def twilio_media_stream(websocket: WebSocket):
+    await websocket.accept()
+    session = CallSession(
+        websocket=websocket,
+        stt=stt_client,
+        tts=tts_client,
+        context_resolver=_resolve_context,
+    )
+    try:
+        await session.handle()
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception:
+        logger.exception("Media stream error")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=settings.APP_HOST, port=settings.APP_PORT, reload=False)

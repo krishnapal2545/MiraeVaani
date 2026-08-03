@@ -1,181 +1,322 @@
-"""
-WebSocket handler for Twilio Media Streams — the core real-time call loop.
+"""Per-call session over Twilio Media Streams: STT -> LLM -> TTS with barge-in.
 
-Flow:
-    Twilio mulaw audio
-        → Silero VAD (local CPU)     — detects speech end
-        → Faster-Whisper on Colab    — transcribes + detects language
-        → Ollama Gemma 2 on Colab    — generates response in detected language
-        → XTTS / IndicTTS on Colab   — synthesizes speech
-        → Twilio mulaw audio
+Turn detection is energy-based: caller audio is buffered while speech is
+detected, and the utterance is finalized after SILENCE_END_SECONDS of quiet.
+The full utterance is then sent to Sarvam STT (with language auto-detection),
+Gemini generates a reply, and Sarvam Bulbul speaks it back in the same language.
 """
 
 import asyncio
 import base64
 import json
 import logging
+import time
+from typing import Callable
 
 from fastapi import WebSocket
 
-from app.asr import ASRClient
+from app.asr import SarvamSTT
+from app.audio import mulaw8k_to_wav16k, mulaw_frame_rms, mulaw_to_pcm, pcm_to_wav_bytes
+from app.call_logger import CallLogger
+from app.config import get_settings
 from app.llm import DialogEngine
-from app.tts import synthesize_speech
-from app.vad import VADBuffer
+from app.prompts import get_prompt
+from app.tts import SarvamTTS
 
 logger = logging.getLogger(__name__)
 
+# Sustained voiced audio needed to treat caller speech as an interruption.
+BARGE_IN_SECONDS = 0.15
+# Outbound audio is sent to Twilio in chunks of this many bytes (1s @ 8kHz mu-law).
+OUTBOUND_CHUNK_BYTES = 8000
 
-class CallHandler:
-    """Manages a single active call session over Twilio Media Streams WebSocket."""
 
-    def __init__(self, websocket: WebSocket, dialog_engine: DialogEngine):
+class CallSession:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        stt: SarvamSTT,
+        tts: SarvamTTS,
+        context_resolver: Callable[[str | None], dict],
+    ) -> None:
         self.ws = websocket
-        self.dialog = dialog_engine
-        self.asr = ASRClient()
+        self.stt = stt
+        self.tts = tts
+        self._resolve_context = context_resolver
+        self._settings = get_settings()
 
         self.stream_sid: str | None = None
         self.call_sid: str | None = None
+        self.dialog: DialogEngine | None = None
+        self.language: str | None = None
+        self.call_log: CallLogger | None = None
+        self._turn = 0
 
-        # VAD buffer — fires _on_speech_end when utterance is complete
-        self.vad = VADBuffer(on_speech_end=self._on_speech_end)
+        # Turn-detection state
+        self._buffer = bytearray()
+        self._capturing = False
+        self._speech_secs = 0.0
+        self._silence_secs = 0.0
 
-        # Turn management
-        self._is_speaking: bool = False       # True while agent TTS is streaming
+        # Agent playback / barge-in state
+        self._is_speaking = False
+        self._mark_counter = 0
+        self._pending_mark: str | None = None
+        self._barge_secs = 0.0
+        self._barge_buffer = bytearray()
+
         self._response_task: asyncio.Task | None = None
 
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
     async def handle(self) -> None:
-        """Main loop: receive Twilio WS messages and dispatch."""
         try:
-            # Send greeting after a brief pause
-            asyncio.create_task(self._send_greeting())
-
             async for raw in self.ws.iter_text():
-                msg = json.loads(raw)
-                event = msg.get("event")
+                message = json.loads(raw)
+                event = message.get("event")
 
                 if event == "start":
-                    self.stream_sid = msg["start"]["streamSid"]
-                    self.call_sid = msg["start"].get("callSid")
-                    logger.info(
-                        "Media stream started: stream=%s call=%s",
-                        self.stream_sid,
-                        self.call_sid,
-                    )
-
-                # elif event == "media":
-                #     payload = msg["media"]["payload"]
-                #     audio_bytes = base64.b64decode(payload)
-
-                #     # Barge-in: if customer speaks while agent is talking, stop TTS
-                #     if self._is_speaking:
-                #         logger.info("Barge-in detected — stopping TTS")
-                #         self._is_speaking = False
-                #         await self._clear_audio()
-                #         self.vad.reset()
-
-                #     # Feed audio to local VAD
-                #     self.vad.feed(audio_bytes)
+                    await self._on_start(message["start"])
                 elif event == "media":
-                    payload = msg["media"]["payload"]
-                    audio_bytes = base64.b64decode(payload)
-
-                    # Skip VAD processing while agent is speaking
-                    if not self._is_speaking:
-                        self.vad.feed(audio_bytes)
-
+                    await self._on_media(base64.b64decode(message["media"]["payload"]))
+                elif event == "mark":
+                    if message.get("mark", {}).get("name") == self._pending_mark:
+                        self._is_speaking = False
                 elif event == "stop":
-                    logger.info("Media stream stopped")
+                    logger.info("Media stream stopped: call=%s", self.call_sid)
                     break
-
         except Exception:
-            logger.exception("Error in call handler")
+            logger.exception("Error in call session")
         finally:
             await self._cleanup()
 
-    async def _on_speech_end(self, pcm_16k_bytes: bytes) -> None:
-        """
-        Called by VADBuffer when a complete customer utterance is detected.
-        Runs: ASR → LLM → TTS pipeline.
-        """
-        logger.debug("VAD: utterance end, %d bytes of PCM audio", len(pcm_16k_bytes))
+    async def _on_start(self, start: dict) -> None:
+        self.stream_sid = start["streamSid"]
+        self.call_sid = start.get("callSid")
+        call_id = (start.get("customParameters") or {}).get("call_id")
 
-        # Cancel any previous in-flight response
-        if self._response_task and not self._response_task.done():
-            self._response_task.cancel()
+        context = self._resolve_context(call_id)
+        system_prompt = get_prompt(context.get("scenario", "inbound"), **context)
 
-        self._response_task = asyncio.create_task(
-            self._process_utterance(pcm_16k_bytes)
+        self.call_log = CallLogger(
+            self._settings.LOGS_DIR, self.call_sid or call_id or "unknown"
+        )
+        self.call_log.event(
+            "call_start",
+            call_sid=self.call_sid,
+            call_id=call_id,
+            scenario=context.get("scenario"),
+            context=context,
         )
 
-    async def _process_utterance(self, pcm_16k_bytes: bytes) -> None:
-        """ASR → LLM → TTS for a single customer utterance."""
+        def _on_payment_agreed(summary: str) -> None:
+            if self.call_log:
+                self.call_log.event("payment_agreed", summary=summary)
+
+        self.dialog = DialogEngine(
+            system_prompt=system_prompt, on_payment_agreed=_on_payment_agreed
+        )
+
+        logger.info(
+            "Stream started: call=%s call_id=%s scenario=%s",
+            self.call_sid, call_id, context.get("scenario"),
+        )
+        self._response_task = asyncio.create_task(self._greet())
+
+    # ------------------------------------------------------------------
+    # Inbound audio: turn detection + barge-in
+    # ------------------------------------------------------------------
+    async def _on_media(self, chunk: bytes) -> None:
+        duration = len(chunk) / 8000.0  # mu-law: 1 byte per sample @ 8kHz
+        voiced = mulaw_frame_rms(chunk) >= self._settings.SILENCE_THRESHOLD_RMS
+
+        if self._is_speaking:
+            # Agent is talking — watch for a sustained interruption.
+            if voiced:
+                self._barge_secs += duration
+                self._barge_buffer.extend(chunk)
+                if self._barge_secs >= BARGE_IN_SECONDS:
+                    logger.info("Barge-in detected")
+                    if self.call_log:
+                        self.call_log.event("barge_in", turn=self._turn)
+                    await self._interrupt_playback()
+                    self._buffer = bytearray(self._barge_buffer)
+                    self._speech_secs = self._barge_secs
+                    self._silence_secs = 0.0
+                    self._capturing = True
+                    self._barge_secs = 0.0
+                    self._barge_buffer.clear()
+            else:
+                self._barge_secs = 0.0
+                self._barge_buffer.clear()
+            return
+
+        if voiced:
+            self._capturing = True
+            self._buffer.extend(chunk)
+            self._speech_secs += duration
+            self._silence_secs = 0.0
+        elif self._capturing:
+            self._buffer.extend(chunk)
+            self._silence_secs += duration
+            if self._silence_secs >= self._settings.SILENCE_END_SECONDS:
+                utterance = bytes(self._buffer)
+                speech_secs = self._speech_secs
+                self._reset_capture()
+                if speech_secs >= self._settings.MIN_UTTERANCE_SECONDS:
+                    if self._response_task and not self._response_task.done():
+                        self._response_task.cancel()
+                    self._response_task = asyncio.create_task(
+                        self._process_utterance(utterance)
+                    )
+
+    def _reset_capture(self) -> None:
+        self._buffer = bytearray()
+        self._capturing = False
+        self._speech_secs = 0.0
+        self._silence_secs = 0.0
+
+    # ------------------------------------------------------------------
+    # STT -> LLM -> TTS pipeline
+    # ------------------------------------------------------------------
+    async def _process_utterance(self, mulaw_utterance: bytes) -> None:
         try:
-            # 1. Transcribe with language detection
-            asr_result = await self.asr.transcribe(pcm_16k_bytes)
-            transcript = asr_result.get("transcript", "").strip()
-            language = asr_result.get("language", "hi")
+            self._turn += 1
+            turn = self._turn
+            turn_start = time.perf_counter()
 
-            if not transcript:
-                logger.info("ASR returned empty transcript — ignoring")
+            # --- STT ---
+            wav_bytes = mulaw8k_to_wav16k(mulaw_utterance)
+            if self.call_log:
+                self.call_log.save_audio(f"turn_{turn:03d}_user.wav", wav_bytes)
+            t0 = time.perf_counter()
+            transcript, detected_language = await self.stt.transcribe(wav_bytes)
+            stt_ms = (time.perf_counter() - t0) * 1000
+            if self.call_log:
+                self.call_log.event(
+                    "stt",
+                    turn=turn,
+                    latency_ms=round(stt_ms),
+                    language=detected_language,
+                    customer_said=transcript,
+                    audio_secs=round(len(mulaw_utterance) / 8000, 2),
+                )
+            if not transcript or not self.dialog:
                 return
+            if detected_language:
+                self.language = detected_language
 
-            logger.info("Customer [%s]: %s", language, transcript)
+            # --- LLM ---
+            t0 = time.perf_counter()
+            reply = await self.dialog.generate_response(transcript, self.language)
+            llm_ms = (time.perf_counter() - t0) * 1000
+            if self.call_log:
+                self.call_log.event(
+                    "llm",
+                    turn=turn,
+                    latency_ms=round(llm_ms),
+                    agent_reply=reply,
+                    payment_agreed=self.dialog.payment_agreed,
+                )
+            logger.info("Agent [%s]: %s", self.language, reply)
 
-            # 2. Pass detected language to dialog engine for context
-            self.dialog.detected_language = language
+            # --- TTS + playback ---
+            await self._speak(reply, turn=turn)
 
-            # 3. Generate LLM response
-            response_text = await self.dialog.generate_response(transcript)
-            logger.info("Agent [%s]: %s", language, response_text)
-
-            # 4. Synthesize and stream TTS
-            await self._stream_tts(response_text, language)
-
+            if self.call_log:
+                self.call_log.event(
+                    "turn_total",
+                    turn=turn,
+                    total_ms=round((time.perf_counter() - turn_start) * 1000),
+                )
         except asyncio.CancelledError:
-            logger.debug("Utterance processing cancelled (barge-in)")
-            self._is_speaking = False
+            pass
         except Exception:
             logger.exception("Error processing utterance")
-            self._is_speaking = False
 
-    async def _stream_tts(self, text: str, language: str) -> None:
-        """Synthesize speech and stream audio chunks to Twilio."""
-        self._is_speaking = True
+    async def _greet(self) -> None:
         try:
-            async for audio_chunk in synthesize_speech(text, language):
-                if not self._is_speaking:
-                    break  # Barge-in cancelled streaming
-                await self._send_audio(audio_chunk)
-        finally:
-            self._is_speaking = False
+            await asyncio.sleep(0.5)
+            if not self.dialog:
+                return
+            t0 = time.perf_counter()
+            greeting = await self.dialog.generate_greeting()
+            llm_ms = (time.perf_counter() - t0) * 1000
+            if self.call_log:
+                self.call_log.event(
+                    "llm", turn=0, latency_ms=round(llm_ms), agent_reply=greeting
+                )
+            logger.info("Agent greeting: %s", greeting)
+            await self._speak(greeting, turn=0)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Error sending greeting")
 
-    async def _send_greeting(self) -> None:
-        """Send the opening agent greeting after the call connects."""
-        await asyncio.sleep(1.0)
-        greeting = await self.dialog.generate_greeting()
-        logger.info("Agent greeting: %s", greeting)
-        await self._stream_tts(greeting, self.dialog.detected_language)
-
-    async def _send_audio(self, audio_payload: str) -> None:
-        """Send a base64-encoded mulaw audio chunk to Twilio via WebSocket."""
-        if not self.stream_sid:
+    async def _speak(self, text: str, turn: int = 0) -> None:
+        """Synthesize and stream audio to Twilio, then track playback via mark."""
+        t0 = time.perf_counter()
+        mulaw_audio = await self.tts.synthesize(text, self.language)
+        tts_ms = (time.perf_counter() - t0) * 1000
+        if self.call_log:
+            self.call_log.event(
+                "tts",
+                turn=turn,
+                latency_ms=round(tts_ms),
+                language=self.language or self._settings.DEFAULT_LANGUAGE,
+                chars=len(text),
+                audio_secs=round(len(mulaw_audio) / 8000, 2),
+            )
+            if mulaw_audio:
+                agent_wav = pcm_to_wav_bytes(mulaw_to_pcm(mulaw_audio), 8000)
+                self.call_log.save_audio(f"turn_{turn:03d}_agent.wav", agent_wav)
+        if not mulaw_audio or not self.stream_sid:
             return
-        await self.ws.send_json({
-            "event": "media",
-            "streamSid": self.stream_sid,
-            "media": {"payload": audio_payload},
-        })
 
-    async def _clear_audio(self) -> None:
-        """Tell Twilio to discard any queued audio (barge-in support)."""
-        if self.stream_sid:
+        self._is_speaking = True
+        self._barge_secs = 0.0
+        self._barge_buffer.clear()
+
+        for offset in range(0, len(mulaw_audio), OUTBOUND_CHUNK_BYTES):
+            if not self._is_speaking:
+                return  # interrupted mid-send
             await self.ws.send_json({
-                "event": "clear",
+                "event": "media",
                 "streamSid": self.stream_sid,
+                "media": {
+                    "payload": base64.b64encode(
+                        mulaw_audio[offset:offset + OUTBOUND_CHUNK_BYTES]
+                    ).decode("ascii")
+                },
             })
 
-    async def _cleanup(self) -> None:
-        """Clean up resources when the call ends."""
+        # Twilio echoes this mark back once all queued audio has played out.
+        self._mark_counter += 1
+        self._pending_mark = f"utterance-{self._mark_counter}"
+        await self.ws.send_json({
+            "event": "mark",
+            "streamSid": self.stream_sid,
+            "mark": {"name": self._pending_mark},
+        })
+
+    async def _interrupt_playback(self) -> None:
+        """Stop agent speech: cancel generation and flush Twilio's audio buffer."""
+        self._is_speaking = False
         if self._response_task and not self._response_task.done():
             self._response_task.cancel()
-        logger.info("Call handler cleaned up: call=%s", self.call_sid)
+        if self.stream_sid:
+            await self.ws.send_json({"event": "clear", "streamSid": self.stream_sid})
+
+    async def _cleanup(self) -> None:
+        if self._response_task and not self._response_task.done():
+            self._response_task.cancel()
+        if self.call_log:
+            self.call_log.event(
+                "call_end",
+                call_sid=self.call_sid,
+                turns=self._turn,
+                payment_agreed=self.dialog.payment_agreed if self.dialog else False,
+            )
+            self.call_log.close()
+        logger.info("Call session cleaned up: call=%s", self.call_sid)

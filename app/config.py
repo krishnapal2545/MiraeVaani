@@ -1,45 +1,40 @@
-"""Application settings — loaded from .env file."""
+"""Environment settings loaded from .env (Pydantic Settings)."""
 
 from functools import lru_cache
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # --- Twilio ---
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Sarvam AI (STT + TTS)
+    SARVAM_API_KEY: str = ""
+    SARVAM_STT_MODEL: str = "saarika:v2.5"
+    SARVAM_TTS_MODEL: str = "bulbul:v2"
+    SARVAM_TTS_SPEAKER: str = "anushka"
+
+    # Google Gemini (LLM)
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+
+    # Twilio
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_PHONE_NUMBER: str = ""
 
-    # --- Colab GPU Services (set after starting Colab notebook) ---
-    STT_BASE_URL: str = ""   # e.g. https://xxxx.ngrok-free.app
-    LLM_BASE_URL: str = ""   # e.g. https://yyyy.ngrok-free.app
-    TTS_BASE_URL: str = ""   # e.g. https://zzzz.ngrok-free.app
-
-    # --- LLM ---
-    LLM_MODEL: str = "gemma2:9b"
-    LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 60
-
-    # --- STT ---
-    STT_LANGUAGE: str = "auto"        # "auto" = auto-detect, or "hi", "ta", "te", etc.
-    STT_WHISPER_MODEL: str = "large-v3"
-
-    # --- TTS ---
-    TTS_DEFAULT_LANGUAGE: str = "hi"  # fallback language if detection fails
-    TTS_SPEAKER: str = "Ana Florence" # default XTTS speaker
-
-    # --- App ---
+    # App
+    BASE_URL: str = "http://localhost:8000"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
-    BASE_URL: str = ""                # Public URL for Twilio webhooks (ngrok/deployment)
     LOG_LEVEL: str = "INFO"
+    LOGS_DIR: str = "logs"
 
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "extra": "ignore",
-    }
+    # Conversation tuning
+    DEFAULT_LANGUAGE: str = "hi-IN"
+    SILENCE_THRESHOLD_RMS: int = 300
+    SILENCE_END_SECONDS: float = 0.8
+    MIN_UTTERANCE_SECONDS: float = 0.3
 
 
 @lru_cache
