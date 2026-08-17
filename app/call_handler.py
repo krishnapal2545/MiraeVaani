@@ -3,7 +3,13 @@
 Turn detection is energy-based: caller audio is buffered while speech is
 detected, and the utterance is finalized after SILENCE_END_SECONDS of quiet.
 The full utterance is then sent to Sarvam STT (with language auto-detection),
-Gemini generates a reply, and Sarvam Bulbul speaks it back in the same language.
+Gemini generates a reply, and Bhashini TTS speaks it back sentence-by-sentence.
+
+Key improvements over v4:
+- Sentence-streaming TTS: first sentence plays while remaining synthesize
+- Barge-in discards old pipeline, answers ONLY the latest question
+- Call hangup: after goodbye the call is disconnected automatically
+- Clear per-service latency logging (STT hit→response, LLM hit→response, TTS hit→first-byte)
 """
 
 import asyncio
@@ -14,6 +20,7 @@ import time
 from typing import Callable
 
 from fastapi import WebSocket
+from twilio.rest import Client as TwilioClient
 
 from app.asr import SarvamSTT
 from app.audio import mulaw8k_to_wav16k, mulaw_frame_rms, mulaw_to_pcm, pcm_to_wav_bytes
@@ -21,7 +28,7 @@ from app.call_logger import CallLogger
 from app.config import get_settings
 from app.llm import DialogEngine
 from app.prompts import get_prompt
-from app.tts import SarvamTTS
+from app.tts import BhashiniTTS
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +36,8 @@ logger = logging.getLogger(__name__)
 BARGE_IN_SECONDS = 0.15
 # Outbound audio is sent to Twilio in chunks of this many bytes (1s @ 8kHz mu-law).
 OUTBOUND_CHUNK_BYTES = 8000
+# Delay before hanging up after goodbye (let final audio play).
+HANGUP_DELAY_SECONDS = 3.0
 
 
 class CallSession:
@@ -36,7 +45,7 @@ class CallSession:
         self,
         websocket: WebSocket,
         stt: SarvamSTT,
-        tts: SarvamTTS,
+        tts: BhashiniTTS,
         context_resolver: Callable[[str | None], dict],
     ) -> None:
         self.ws = websocket
@@ -66,6 +75,7 @@ class CallSession:
         self._barge_buffer = bytearray()
 
         self._response_task: asyncio.Task | None = None
+        self._hangup_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Main loop
@@ -114,8 +124,14 @@ class CallSession:
             if self.call_log:
                 self.call_log.event("payment_agreed", summary=summary)
 
+        def _on_call_end() -> None:
+            if self.call_log:
+                self.call_log.event("call_end_triggered")
+
         self.dialog = DialogEngine(
-            system_prompt=system_prompt, on_payment_agreed=_on_payment_agreed
+            system_prompt=system_prompt,
+            on_payment_agreed=_on_payment_agreed,
+            on_call_end=_on_call_end,
         )
 
         logger.info(
@@ -137,7 +153,7 @@ class CallSession:
                 self._barge_secs += duration
                 self._barge_buffer.extend(chunk)
                 if self._barge_secs >= BARGE_IN_SECONDS:
-                    logger.info("Barge-in detected")
+                    logger.info("Barge-in detected — cancelling current response")
                     if self.call_log:
                         self.call_log.event("barge_in", turn=self._turn)
                     await self._interrupt_playback()
@@ -165,8 +181,13 @@ class CallSession:
                 speech_secs = self._speech_secs
                 self._reset_capture()
                 if speech_secs >= self._settings.MIN_UTTERANCE_SECONDS:
+                    # Cancel any old in-flight response — only latest question matters
                     if self._response_task and not self._response_task.done():
                         self._response_task.cancel()
+                        try:
+                            await self._response_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                     self._response_task = asyncio.create_task(
                         self._process_utterance(utterance)
                     )
@@ -190,48 +211,69 @@ class CallSession:
             wav_bytes = mulaw8k_to_wav16k(mulaw_utterance)
             if self.call_log:
                 self.call_log.save_audio(f"turn_{turn:03d}_user.wav", wav_bytes)
-            t0 = time.perf_counter()
+
+            stt_hit = time.perf_counter()
             transcript, detected_language = await self.stt.transcribe(wav_bytes)
-            stt_ms = (time.perf_counter() - t0) * 1000
+            stt_done = time.perf_counter()
+            stt_ms = (stt_done - stt_hit) * 1000
+
             if self.call_log:
                 self.call_log.event(
                     "stt",
                     turn=turn,
+                    hit_at_ms=round((stt_hit - turn_start) * 1000),
                     latency_ms=round(stt_ms),
                     language=detected_language,
                     customer_said=transcript,
                     audio_secs=round(len(mulaw_utterance) / 8000, 2),
                 )
+
             if not transcript or not self.dialog:
                 return
             if detected_language:
                 self.language = detected_language
 
             # --- LLM ---
-            t0 = time.perf_counter()
+            llm_hit = time.perf_counter()
             reply = await self.dialog.generate_response(transcript, self.language)
-            llm_ms = (time.perf_counter() - t0) * 1000
+            llm_done = time.perf_counter()
+            llm_ms = (llm_done - llm_hit) * 1000
+
             if self.call_log:
                 self.call_log.event(
                     "llm",
                     turn=turn,
+                    hit_at_ms=round((llm_hit - turn_start) * 1000),
                     latency_ms=round(llm_ms),
                     agent_reply=reply,
                     payment_agreed=self.dialog.payment_agreed,
+                    call_ended=self.dialog.call_ended,
                 )
             logger.info("Agent [%s]: %s", self.language, reply)
 
-            # --- TTS + playback ---
-            await self._speak(reply, turn=turn)
+            # --- TTS + streaming playback ---
+            tts_hit = time.perf_counter()
+            await self._speak_streaming(reply, turn=turn, tts_hit=tts_hit)
+            tts_done = time.perf_counter()
+            tts_ms = (tts_done - tts_hit) * 1000
 
+            total_ms = (time.perf_counter() - turn_start) * 1000
             if self.call_log:
                 self.call_log.event(
                     "turn_total",
                     turn=turn,
-                    total_ms=round((time.perf_counter() - turn_start) * 1000),
+                    stt_ms=round(stt_ms),
+                    llm_ms=round(llm_ms),
+                    tts_ms=round(tts_ms),
+                    total_ms=round(total_ms),
                 )
+
+            # --- Hangup if call ended ---
+            if self.dialog.call_ended:
+                self._hangup_task = asyncio.create_task(self._hangup_after_delay())
+
         except asyncio.CancelledError:
-            pass
+            logger.info("Turn %d cancelled (barge-in or newer utterance)", self._turn)
         except Exception:
             logger.exception("Error processing utterance")
 
@@ -248,50 +290,69 @@ class CallSession:
                     "llm", turn=0, latency_ms=round(llm_ms), agent_reply=greeting
                 )
             logger.info("Agent greeting: %s", greeting)
-            await self._speak(greeting, turn=0)
+            tts_hit = time.perf_counter()
+            await self._speak_streaming(greeting, turn=0, tts_hit=tts_hit)
         except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("Error sending greeting")
 
-    async def _speak(self, text: str, turn: int = 0) -> None:
-        """Synthesize and stream audio to Twilio, then track playback via mark."""
-        t0 = time.perf_counter()
-        mulaw_audio = await self.tts.synthesize(text, self.language)
-        tts_ms = (time.perf_counter() - t0) * 1000
-        if self.call_log:
-            self.call_log.event(
-                "tts",
-                turn=turn,
-                latency_ms=round(tts_ms),
-                language=self.language or self._settings.DEFAULT_LANGUAGE,
-                chars=len(text),
-                audio_secs=round(len(mulaw_audio) / 8000, 2),
-            )
-            if mulaw_audio:
-                agent_wav = pcm_to_wav_bytes(mulaw_to_pcm(mulaw_audio), 8000)
-                self.call_log.save_audio(f"turn_{turn:03d}_agent.wav", agent_wav)
-        if not mulaw_audio or not self.stream_sid:
+    async def _speak_streaming(self, text: str, turn: int = 0, tts_hit: float = 0) -> None:
+        """Synthesize sentence-by-sentence and stream each to Twilio immediately."""
+        if not self.stream_sid:
             return
 
         self._is_speaking = True
         self._barge_secs = 0.0
         self._barge_buffer.clear()
 
-        for offset in range(0, len(mulaw_audio), OUTBOUND_CHUNK_BYTES):
-            if not self._is_speaking:
-                return  # interrupted mid-send
-            await self.ws.send_json({
-                "event": "media",
-                "streamSid": self.stream_sid,
-                "media": {
-                    "payload": base64.b64encode(
-                        mulaw_audio[offset:offset + OUTBOUND_CHUNK_BYTES]
-                    ).decode("ascii")
-                },
-            })
+        total_audio = bytearray()
+        first_byte_logged = False
 
-        # Twilio echoes this mark back once all queued audio has played out.
+        async for mulaw_chunk in self.tts.synthesize_streaming(text, self.language):
+            if not self._is_speaking:
+                return  # interrupted
+
+            if not first_byte_logged and self.call_log:
+                ttfb_ms = (time.perf_counter() - tts_hit) * 1000
+                self.call_log.event("tts_first_byte", turn=turn, ttfb_ms=round(ttfb_ms))
+                first_byte_logged = True
+
+            total_audio.extend(mulaw_chunk)
+
+            # Send this sentence's audio to Twilio immediately
+            for offset in range(0, len(mulaw_chunk), OUTBOUND_CHUNK_BYTES):
+                if not self._is_speaking:
+                    return
+                await self.ws.send_json({
+                    "event": "media",
+                    "streamSid": self.stream_sid,
+                    "media": {
+                        "payload": base64.b64encode(
+                            mulaw_chunk[offset:offset + OUTBOUND_CHUNK_BYTES]
+                        ).decode("ascii")
+                    },
+                })
+
+        if not self._is_speaking:
+            return
+
+        # Log total TTS audio
+        if self.call_log:
+            tts_total_ms = (time.perf_counter() - tts_hit) * 1000
+            self.call_log.event(
+                "tts",
+                turn=turn,
+                total_ms=round(tts_total_ms),
+                language=self.language or self._settings.DEFAULT_LANGUAGE,
+                chars=len(text),
+                audio_secs=round(len(total_audio) / 8000, 2),
+            )
+            if total_audio:
+                agent_wav = pcm_to_wav_bytes(mulaw_to_pcm(bytes(total_audio)), 8000)
+                self.call_log.save_audio(f"turn_{turn:03d}_agent.wav", agent_wav)
+
+        # Twilio mark to track when playback finishes
         self._mark_counter += 1
         self._pending_mark = f"utterance-{self._mark_counter}"
         await self.ws.send_json({
@@ -308,9 +369,25 @@ class CallSession:
         if self.stream_sid:
             await self.ws.send_json({"event": "clear", "streamSid": self.stream_sid})
 
+    async def _hangup_after_delay(self) -> None:
+        """Wait for final audio to play, then hang up the call via Twilio REST."""
+        try:
+            await asyncio.sleep(HANGUP_DELAY_SECONDS)
+            if self.call_sid:
+                logger.info("Hanging up call: %s", self.call_sid)
+                if self.call_log:
+                    self.call_log.event("hangup", call_sid=self.call_sid)
+                settings = self._settings
+                client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+                client.calls(self.call_sid).update(status="completed")
+        except Exception:
+            logger.exception("Failed to hang up call")
+
     async def _cleanup(self) -> None:
         if self._response_task and not self._response_task.done():
             self._response_task.cancel()
+        if self._hangup_task and not self._hangup_task.done():
+            self._hangup_task.cancel()
         if self.call_log:
             self.call_log.event(
                 "call_end",

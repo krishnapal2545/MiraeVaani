@@ -2,12 +2,14 @@
 
 Twilio Media Streams carry 8kHz 8-bit mu-law mono audio.
 Sarvam STT works best with 16kHz 16-bit PCM WAV.
-Sarvam TTS is asked for 8kHz WAV so output maps straight back to mu-law.
+Bhashini TTS returns MP3 -> decoded via pydub -> mu-law.
 """
 
 import audioop
 import io
 import wave
+
+from pydub import AudioSegment
 
 
 def mulaw_to_pcm(mulaw_bytes: bytes) -> bytes:
@@ -68,3 +70,11 @@ def wav_to_mulaw8k(wav_bytes: bytes) -> bytes:
     pcm, rate = wav_bytes_to_pcm(wav_bytes)
     pcm8k = resample_pcm(pcm, rate, 8000)
     return pcm_to_mulaw(pcm8k)
+
+
+def mp3_to_mulaw8k(mp3_bytes: bytes) -> bytes:
+    """Convert MP3 audio (from Bhashini TTS) -> 8kHz mu-law for Twilio."""
+    audio = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
+    audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+    pcm_bytes = audio.raw_data
+    return pcm_to_mulaw(pcm_bytes)

@@ -1,4 +1,4 @@
-# MiraeVaani 4.0 — Multilingual AI Voice Agent
+# MiraeVaani 5.0 — Multilingual AI Voice Agent
 
 AI voice agent for Indian customer calls (outbound alerts + inbound support) built on a fully API-based stack, optimized for Indian regional languages and Indian-accented English.
 
@@ -8,7 +8,7 @@ AI voice agent for Indian customer calls (outbound alerts + inbound support) bui
 |-----------|----------|-----|
 | STT | Sarvam Saarika (`saarika:v2.5`) | 22 Indian languages, per-utterance auto language detection, code-mixing (Hinglish/Tanglish) |
 | LLM | Gemini 2.5 Flash-Lite (thinking disabled) | Fast TTFT, cheap, strong Indian-language quality |
-| TTS | Sarvam Bulbul (`bulbul:v2`) | Natural Indian voices in 11 languages |
+| TTS | Bhashini AI (REST `/v2/synthesize`) | 22+ Indian languages, low-latency, sentence streaming |
 | Telephony | Twilio Media Streams | Bidirectional 8kHz mu-law WebSocket |
 
 ## Architecture
@@ -18,9 +18,18 @@ Caller ↔ Twilio (PSTN) ↔ FastAPI WebSocket (8kHz mu-law)
         → energy-based turn detection (utterance buffering)
         → Sarvam STT (auto language detect, 16kHz WAV)
         → Gemini 2.5 Flash-Lite (replies in caller's language)
-        → Sarvam Bulbul TTS (same language, 8kHz)
+        → Bhashini TTS (sentence-streaming, MP3 → mu-law)
         → Twilio → Caller
 ```
+
+## v5 Improvements over v4
+
+- **Bhashini TTS** replaces Sarvam Bulbul — 22+ Indian languages via REST
+- **Sentence-streaming TTS** — first sentence starts playing before full response is synthesized (low TTFB)
+- **Clear latency logging** — per-service hit/response timestamps (STT, LLM, TTS first-byte, turn total)
+- **Fixed barge-in** — old in-flight response is fully cancelled; only the latest question gets answered
+- **Auto call hangup** — LLM calls `end_call` tool after goodbye, Twilio disconnects automatically
+- **Requires ffmpeg** — for pydub MP3 decoding (install via `choco install ffmpeg` or `apt install ffmpeg`)
 
 The agent detects the caller's language on every utterance and replies in that language — Hindi, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Punjabi, Odia, or English.
 
@@ -28,7 +37,9 @@ The agent detects the caller's language on every utterance and replies in that l
 
 ### 1. Prerequisites
 - Python 3.11+
-- [Sarvam AI API key](https://dashboard.sarvam.ai) (STT + TTS)
+- **ffmpeg** installed and on PATH (for MP3 decoding: `choco install ffmpeg` / `apt install ffmpeg`)
+- [Sarvam AI API key](https://dashboard.sarvam.ai) (STT)
+- [Bhashini AI API key](https://pay.bhashini.ai) (TTS)
 - [Gemini API key](https://aistudio.google.com/apikey)
 - [Twilio account](https://console.twilio.com) with a voice-enabled phone number
 - [ngrok](https://ngrok.com/) for local development
@@ -94,7 +105,8 @@ Add new scenarios in `app/prompts.py`.
 
 ## Configuration notes
 
-- **TTS voice/model:** set `SARVAM_TTS_MODEL=bulbul:v3` and a v3 speaker (e.g. `SARVAM_TTS_SPEAKER=meera`) in `.env` for the newest voices. Default is `bulbul:v2` + `anushka`.
+- **TTS voices:** `BHASHINI_TTS_VOICE_EN=Female3` for English, `BHASHINI_TTS_VOICE_HI=hi-f3` for Hindi/other. See full list at `https://app.bhashini.ai/voices.json`.
+- **TTS style:** `BHASHINI_TTS_STYLE=Neutral` (options: Neutral, Conversational, News, Book, Command, Happy, Sad, etc.)
 - **Turn detection:** tune `SILENCE_THRESHOLD_RMS` (noise floor) and `SILENCE_END_SECONDS` (pause that ends a turn) in `.env`.
 - **Default language:** `DEFAULT_LANGUAGE` is used for the greeting before the caller's language is detected.
 
@@ -155,7 +167,8 @@ Add new scenarios in `app/prompts.py`.
 ## Production roadmap
 
 - Move `CALL_CONTEXTS` to Redis; add auth on `/api/call`
-- Switch STT/TTS to Sarvam **WebSocket streaming** APIs to cut per-turn latency further
+- Switch STT to Sarvam **WebSocket streaming** API for even lower latency
+- Switch TTS to Bhashini **WebSocket streaming** (`wss://tts.bhashini.ai/tts/stream`) for chunk-level streaming
 - Call recording + transcript storage (PostgreSQL)
 - Rate limiting, concurrent-call caps, monitoring/alerting
 - If concurrency outgrows Python: port the media orchestration hot path to Go, keep this service as the LLM "brain"

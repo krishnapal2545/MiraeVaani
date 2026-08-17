@@ -1,6 +1,6 @@
-"""MiraeVaani 4.0 — FastAPI entry point.
+"""MiraeVaani 5.0 — FastAPI entry point.
 
-Pipeline: Twilio Media Streams <-> Sarvam Saarika STT -> Gemini 2.5 Flash-Lite -> Sarvam Bulbul TTS
+Pipeline: Twilio Media Streams <-> Sarvam Saarika STT -> Gemini 2.5 Flash-Lite -> Bhashini TTS
 """
 
 import logging
@@ -14,7 +14,7 @@ from app.asr import SarvamSTT
 from app.call_handler import CallSession
 from app.call_manager import CallManager
 from app.config import get_settings
-from app.tts import SarvamTTS
+from app.tts import BhashiniTTS
 
 settings = get_settings()
 logging.basicConfig(
@@ -28,31 +28,31 @@ CALL_CONTEXTS: dict[str, dict] = {}
 
 # Shared API clients (connection pooling across calls).
 stt_client: SarvamSTT | None = None
-tts_client: SarvamTTS | None = None
+tts_client: BhashiniTTS | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global stt_client, tts_client
     stt_client = SarvamSTT()
-    tts_client = SarvamTTS()
-    logger.info("Sarvam clients initialized. BASE_URL=%s", settings.BASE_URL)
+    tts_client = BhashiniTTS()
+    logger.info("STT=Sarvam, TTS=Bhashini initialized. BASE_URL=%s", settings.BASE_URL)
     yield
     await stt_client.close()
     await tts_client.close()
 
 
 app = FastAPI(
-    title="MiraeVaani 4.0",
-    description="Multilingual AI voice agent (Sarvam + Gemini + Twilio)",
-    version="4.0.0",
+    title="MiraeVaani 5.0",
+    description="Multilingual AI voice agent (Sarvam STT + Gemini + Bhashini TTS + Twilio)",
+    version="5.0.0",
     lifespan=lifespan,
 )
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "MiraeVaani 4.0"}
+    return {"status": "ok", "service": "MiraeVaani 5.0"}
 
 
 # ---------------------------------------------------------------------------

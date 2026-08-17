@@ -8,15 +8,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Sarvam AI (STT + TTS)
+    # Sarvam AI (STT)
     SARVAM_API_KEY: str = ""
     SARVAM_STT_MODEL: str = "saarika:v2.5"
-    SARVAM_TTS_MODEL: str = "bulbul:v2"
-    SARVAM_TTS_SPEAKER: str = "anushka"
+
+    # Bhashini AI (TTS)
+    BHASHINI_API_KEY: str = ""
+    BHASHINI_TTS_VOICE_EN: str = "Female3"
+    BHASHINI_TTS_VOICE_HI: str = "hi-f3"
+    BHASHINI_TTS_STYLE: str = "Neutral"
+    BHASHINI_TTS_BASE_URL: str = "https://tts.bhashini.ai"
+
+    # LLM Provider: "gemini" or "groq"
+    LLM_PROVIDER: str = "gemini"
 
     # Google Gemini (LLM)
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+
+    # Groq (LLM)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
 
     # Twilio
     TWILIO_ACCOUNT_SID: str = ""
