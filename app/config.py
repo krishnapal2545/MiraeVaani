@@ -1,45 +1,30 @@
-"""Application settings — loaded from .env file."""
+"""Infrastructure settings only.
+
+Unlike v5, this holds NO provider credentials — those live in the `credentials`
+table, entered through the UI and encrypted at rest. Everything an agent needs
+comes from its row in the `agents` table.
+"""
 
 from functools import lru_cache
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # --- Twilio ---
-    TWILIO_ACCOUNT_SID: str = ""
-    TWILIO_AUTH_TOKEN: str = ""
-    TWILIO_PHONE_NUMBER: str = ""
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # --- Colab GPU Services (set after starting Colab notebook) ---
-    STT_BASE_URL: str = ""   # e.g. https://xxxx.ngrok-free.app
-    LLM_BASE_URL: str = ""   # e.g. https://yyyy.ngrok-free.app
-    TTS_BASE_URL: str = ""   # e.g. https://zzzz.ngrok-free.app
+    # Public HTTPS base URL Twilio calls back on (ngrok/cloudflared tunnel).
+    BASE_URL: str = "http://localhost:8000"
 
-    # --- LLM ---
-    LLM_MODEL: str = "gemma2:9b"
-    LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 60
-
-    # --- STT ---
-    STT_LANGUAGE: str = "auto"        # "auto" = auto-detect, or "hi", "ta", "te", etc.
-    STT_WHISPER_MODEL: str = "large-v3"
-
-    # --- TTS ---
-    TTS_DEFAULT_LANGUAGE: str = "hi"  # fallback language if detection fails
-    TTS_SPEAKER: str = "Ana Florence" # default XTTS speaker
-
-    # --- App ---
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
-    BASE_URL: str = ""                # Public URL for Twilio webhooks (ngrok/deployment)
     LOG_LEVEL: str = "INFO"
+    LOGS_DIR: str = "logs"
+    DB_PATH: str = "miraevaani.db"
 
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "extra": "ignore",
-    }
+    # Passphrase used to derive the Fernet key that encrypts stored API keys.
+    # Change this and every saved credential becomes unreadable.
+    APP_SECRET: str = "change-me-in-dot-env"
 
 
 @lru_cache

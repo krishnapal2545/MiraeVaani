@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiraeVaani — Voice Agents</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <h1>MiraeVaani</h1>
+      <p>Configurable multilingual voice agents</p>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="agents">Agents</button>
+    <button class="tab" data-view="calls">Calls</button>
+    <button class="tab" data-view="credentials">Credentials</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ================= AGENTS LIST ================= -->
+  <section id="view-agents" class="view active">
+    <div class="view-head">
+      <h2>Your agents</h2>
+      <button class="btn primary" id="new-agent">+ New agent</button>
+    </div>
+    <div id="agent-list" class="cards"></div>
+    <p id="agents-empty" class="empty hidden">
+      No agents yet. Create one to get started — you'll pick the speech, language
+      and voice models, then write what the agent should say.
+    </p>
+  </section>
+
+  <!-- ================= AGENT BUILDER ================= -->
+  <section id="view-builder" class="view">
+    <div class="view-head">
+      <h2 id="builder-title">New agent</h2>
+      <div class="row-gap">
+        <button class="btn ghost" id="builder-cancel">Cancel</button>
+        <button class="btn primary" id="builder-save">Save agent</button>
+      </div>
+    </div>
+
+    <div class="builder-grid">
+      <div class="panel">
+        <h3>Identity</h3>
+        <label>Agent name
+          <input id="f-name" type="text" placeholder="Margin shortfall caller">
+        </label>
+
+        <h3>Speech to text</h3>
+        <div class="two">
+          <label>Provider <select id="f-stt-provider"></select></label>
+          <label>Model <select id="f-stt-model"></select></label>
+        </div>
+        <p class="note" id="stt-note"></p>
+
+        <h3>Language</h3>
+        <div class="two">
+          <label>Mode
+            <select id="f-language-mode">
+              <option value="auto">Auto-detect per utterance</option>
+              <option value="fixed">Fixed language</option>
+            </select>
+          </label>
+          <label>Language <select id="f-language"></select></label>
+        </div>
+        <p class="note">Auto lets the caller switch language mid-call. Fixed stops a
+          single mis-detection from changing the agent's voice.</p>
+
+        <h3>Language model</h3>
+        <div class="two">
+          <label>Provider <select id="f-llm-provider"></select></label>
+          <label>Model <select id="f-llm-model"></select></label>
+        </div>
+        <div class="two">
+          <label>Temperature <input id="f-temperature" type="number" step="0.1" min="0" max="2"></label>
+          <label>Max reply tokens <input id="f-max-tokens" type="number" min="30" max="500"></label>
+        </div>
+        <p class="note" id="llm-note"></p>
+      </div>
+
+      <div class="panel">
+        <h3>Text to speech</h3>
+        <div class="two">
+          <label>Provider <select id="f-tts-provider"></select></label>
+          <label>Voice <select id="f-tts-voice"></select></label>
+        </div>
+        <div class="row-gap">
+          <button class="btn ghost small" id="preview-voice">▶ Preview voice</button>
+          <span class="note inline" id="preview-status"></span>
+        </div>
+        <p class="note" id="tts-note"></p>
+
+        <h3>Smart fillers</h3>
+        <label class="check">
+          <input id="f-fillers" type="checkbox" checked>
+          <span>Speak a short filler when the reply is slow</span>
+        </label>
+        <label>Wait before filler — <b id="filler-delay-label">350</b> ms
+          <input id="f-filler-delay" type="range" min="150" max="1200" step="50">
+        </label>
+        <p class="note">Fillers are pre-synthesized when the call starts and chosen
+          from what the caller just said. If the reply arrives first, none is played.</p>
+
+        <h3>Turn detection</h3>
+        <div class="two">
+          <label>Silence threshold (RMS) <input id="f-rms" type="number" min="50" max="2000"></label>
+          <label>End of turn (s) <input id="f-silence" type="number" step="0.1" min="0.2" max="3"></label>
+        </div>
+
+        <h3>Escalation</h3>
+        <label>Redirect number (human handoff)
+          <input id="f-redirect" type="text" placeholder="+9198XXXXXXXX">
+        </label>
+      </div>
+
+      <div class="panel wide">
+        <div class="row-between">
+          <h3>Instructions</h3>
+          <label class="inline-select">Start from
+            <select id="f-starter"><option value="">— template —</option></select>
+          </label>
+        </div>
+        <textarea id="f-prompt" rows="18" spellcheck="false"
+          placeholder="Describe who the agent is, the scenario, and the call flow. Use $variables for per-call values."></textarea>
+        <p class="note">
+          Use <code>$customer_name</code> style placeholders — they're filled in when
+          you place a call. Detected variables:
+          <span id="prompt-vars" class="vars">none</span>
+        </p>
+
+        <h3>Greeting</h3>
+        <div class="two">
+          <label>Mode
+            <select id="f-greeting-mode">
+              <option value="llm">Let the model open the call</option>
+              <option value="static">Fixed opening line</option>
+            </select>
+          </label>
+          <label>Opening line <input id="f-greeting-text" type="text" placeholder="Namaste, main Vaani bol rahi hoon..."></label>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CALL ================= -->
+  <section id="view-call" class="view">
+    <div class="view-head">
+      <h2>Call — <span id="call-agent-name"></span></h2>
+      <button class="btn ghost" id="call-back">← Back to agents</button>
+    </div>
+
+    <div class="call-grid">
+      <div class="panel">
+        <h3>Place a call</h3>
+        <label>Phone number
+          <input id="f-to" type="tel" placeholder="+9198XXXXXXXX">
+        </label>
+        <div id="call-variables"></div>
+        <button class="btn primary wide-btn" id="do-call">Call now</button>
+        <p class="note" id="call-error"></p>
+
+        <div id="call-meta" class="meta hidden">
+          <div class="statusline">
+            <span class="pill" id="call-status">queued</span>
+            <span class="note inline" id="call-latency"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Live transcript</h3>
+        <div id="transcript" class="transcript">
+          <p class="empty">The conversation will appear here as it happens.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CALLS HISTORY ================= -->
+  <section id="view-calls" class="view">
+    <div class="view-head"><h2>Call history</h2>
+      <button class="btn ghost" id="refresh-calls">Refresh</button></div>
+    <table class="table">
+      <thead><tr>
+        <th>When</th><th>Agent</th><th>To</th><th>Status</th>
+        <th>Turns</th><th>Outcome</th><th></th>
+      </tr></thead>
+      <tbody id="calls-body"></tbody>
+    </table>
+    <div id="call-detail" class="panel hidden">
+      <div class="row-between"><h3>Transcript</h3>
+        <button class="btn ghost small" id="close-detail">Close</button></div>
+      <div id="detail-transcript" class="transcript"></div>
+    </div>
+  </section>
+
+  <!-- ================= CREDENTIALS ================= -->
+  <section id="view-credentials" class="view">
+    <div class="view-head"><h2>Credentials</h2>
+      <button class="btn primary" id="save-credentials">Save</button></div>
+    <p class="note wide-note">
+      Keys are encrypted before they're written to disk and are never sent back to
+      the browser in full. Leave a field blank to keep the saved value.
+    </p>
+    <div class="panel">
+      <h3>AI providers</h3>
+      <div id="credential-fields"></div>
+    </div>
+    <div class="panel">
+      <h3>Twilio</h3>
+      <div class="two">
+        <label>Account SID <input id="tw-sid" type="text" placeholder="ACxxxxxxxx"></label>
+        <label>Auth token <input id="tw-token" type="password" placeholder="leave blank to keep"></label>
+      </div>
+      <label>From number <input id="tw-from" type="tel" placeholder="+1XXXXXXXXXX"></label>
+      <p class="note" id="tw-status"></p>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
