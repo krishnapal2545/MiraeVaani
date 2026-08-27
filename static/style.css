@@ -96,6 +96,10 @@ label.check input { width: auto; margin: 0; }
 .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
 .note.inline { display: inline; }
 .wide-note { margin-bottom: 16px; }
+.cred-status { margin: 4px 0 12px; line-height: 1.4; }
+.cred-status.ok { color: var(--good); }
+.cred-status.bad { color: var(--bad); }
+.cred-status.warn { color: var(--warn); }
 .vars { color: var(--accent); font-family: ui-monospace, monospace; }
 .empty { color: var(--muted); font-size: 13px; }
 .hidden { display: none !important; }

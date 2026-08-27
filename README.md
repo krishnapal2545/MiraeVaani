@@ -80,13 +80,27 @@ Everything is entered on the **Credentials** page — nothing goes in `.env`. Ke
 are encrypted with `APP_SECRET` before being written to SQLite and are never sent
 back to the browser in full.
 
+Save probes every key against its provider first: a key the provider rejects is
+reported inline and **not stored**, so a bad key fails on the Credentials page
+instead of as dead air mid-call. Anything the check cannot settle (provider
+unreachable, an API not enabled, a from-number that is not on the Twilio account)
+is saved with an amber warning. **Test saved keys** re-runs the same checks
+against what is already stored.
+
+The agent builder's LLM model dropdown is filled from the provider's own model
+list once its key is saved (cached for five minutes), because hardcoded model ids
+rot — Groq retired the `llama-3.x` ids this app shipped with. Placing a call also
+refuses to dial if the agent's saved model is no longer available, naming the ones
+that are.
+
 | Provider | Used for | Where to get it |
 |---|---|---|
 | Sarvam AI | Saarika STT **and** Bulbul TTS | dashboard.sarvam.ai |
 | Bhashini AI | TTS | bhashini.ai |
 | Google Cloud | Speech-to-Text and Text-to-Speech | GCP API key, both APIs enabled + billing on |
 | Google Gemini | LLM | aistudio.google.com |
-| Groq | LLM | console.groq.com |
+| Groq (Llama) | LLM | console.groq.com — key starts `gsk_` |
+| xAI Grok | LLM | console.x.ai — key starts `xai-`, team needs credits |
 | Twilio | Telephony | Account SID, auth token, and a voice-capable number |
 
 ---
@@ -128,6 +142,7 @@ app/
   main.py          FastAPI: UI, agent/credential CRUD, call API, Twilio webhooks, WS, SSE
   models.py        AgentConfig — the object that replaced v5's global Settings
   db.py            SQLite: agents, credentials, calls, turns
+  verify.py        live credential probes run before a key is stored
   crypto.py        Fernet encryption for stored keys
   registry.py      CATALOG + builds providers from an agent row
   dialog.py        provider-agnostic history and tool dispatch

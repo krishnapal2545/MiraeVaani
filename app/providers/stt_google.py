@@ -56,6 +56,11 @@ class GoogleSTT(STTProvider):
                 GOOGLE_STT_URL, params={"key": self._api_key}, json=payload
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Google STT %s: %s", exc.response.status_code, exc.response.text[:500]
+            )
+            return "", None
         except httpx.HTTPError:
             logger.exception("Google STT request failed")
             return "", None

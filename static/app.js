@@ -404,6 +404,10 @@ function watchCall(callId) {
         delete pending[e.turn];
         break;
       }
+      case "llm_error":
+        bubble("LLM failed — caller heard the fallback line", e.error || "", "filler agent");
+        toast("LLM error: " + (e.error || "empty response"), true);
+        break;
       case "outcome":
         bubble("Outcome recorded", `${e.outcome} — ${e.summary}`, "filler agent");
         break;
@@ -486,6 +490,20 @@ $("refresh-calls").onclick = loadCalls;
 /* ------------------------------------------------------------------ */
 /* credentials                                                         */
 /* ------------------------------------------------------------------ */
+const STATUS_CLASS = { ok: "ok", invalid: "bad", unknown: "warn" };
+
+function showCredResult(key, result) {
+  const el = document.querySelector(`[data-status-for="${key}"]`);
+  if (!el || !result) return;
+  const prefix = { ok: "✓", invalid: "✕", unknown: "!" }[result.status] || "";
+  el.textContent = `${prefix} ${result.message}`;
+  el.className = `note cred-status ${STATUS_CLASS[result.status] || ""}`;
+}
+
+function showCredResults(results) {
+  Object.entries(results || {}).forEach(([key, result]) => showCredResult(key, result));
+}
+
 async function loadCredentials() {
   const data = await api("/api/credentials");
   const box = $("credential-fields");
@@ -500,6 +518,11 @@ async function loadCredentials() {
     input.placeholder = p.configured ? `saved (${p.masked})` : "not set";
     label.appendChild(input);
     box.appendChild(label);
+
+    const status = document.createElement("p");
+    status.className = "note cred-status";
+    status.dataset.statusFor = p.key;
+    box.appendChild(status);
   });
 
   $("tw-sid").value = data.twilio.account_sid || "";
@@ -508,15 +531,20 @@ async function loadCredentials() {
     ? `saved (${data.twilio.auth_token_masked})` : "not set";
   $("tw-status").textContent = data.twilio.configured
     ? "Twilio is configured." : "Twilio is not configured — calls will be refused.";
+  $("tw-status").className = "note cred-status";
 }
 
-$("save-credentials").onclick = async () => {
+$("save-credentials").onclick = async (event) => {
+  const button = event.currentTarget;
   const providers = {};
   document.querySelectorAll("#credential-fields input").forEach((input) => {
     if (input.value.trim()) providers[input.dataset.cred] = input.value.trim();
   });
+
+  button.disabled = true;
+  button.textContent = "Checking…";
   try {
-    await api("/api/credentials", {
+    const data = await api("/api/credentials", {
       method: "POST",
       body: JSON.stringify({
         providers,
@@ -527,11 +555,39 @@ $("save-credentials").onclick = async () => {
         },
       }),
     });
-    toast("Credentials saved");
-    loadCredentials();
+    await loadCredentials();
+    showCredResults(data.results);
+    if (data.rejected.length) {
+      toast(`Not saved — rejected by the provider: ${data.rejected.join(", ")}`, true);
+    } else {
+      toast(data.saved.length ? "Credentials verified and saved" : "Nothing to save");
+    }
     loadCatalog();
   } catch (err) {
     toast(err.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save";
+  }
+};
+
+$("test-credentials").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "Testing…";
+  try {
+    const data = await api("/api/credentials/test", { method: "POST" });
+    showCredResults(data.results);
+    const bad = Object.entries(data.results).filter(([, r]) => r.status === "invalid");
+    toast(
+      bad.length ? `Rejected: ${bad.map(([k]) => k).join(", ")}` : "All saved keys work",
+      bad.length > 0
+    );
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Test saved keys";
   }
 };
 

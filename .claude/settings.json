@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m compileall -q app/main.py app/verify.py)",
+      "Bash(node --check static/app.js)",
+      "PowerShell(python \"C:\\\\Users\\\\krish\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Tech-MiraeVaani-MiraeVaani6-0\\\\8f9b951b-ed34-4999-b610-5f00b76dd065\\\\scratchpad\\\\test_fixes.py\")",
+      "PowerShell($env:PYTHONUNBUFFERED=1; Start-Process -FilePath \".venv\\\\Scripts\\\\python.exe\" -ArgumentList \"-m\",\"uvicorn\",\"app.main:app\",\"--port\",\"8099\",\"--log-level\",\"warning\" -RedirectStandardOutput \"$env:TEMP\\\\mv_out.log\" -RedirectStandardError \"$env:TEMP\\\\mv_err.log\" -PassThru | Select-Object Id)",
+      "PowerShell(Stop-Process -Id 26764 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(git -C \"d:\\\\Tech\\\\MiraeVaani\\\\MiraeVaani6.0\" status --short)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe scripts\\\\test_session.py 2>&1)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe \"C:\\\\Users\\\\krish\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Tech-MiraeVaani-MiraeVaani6-0\\\\8f9b951b-ed34-4999-b610-5f00b76dd065\\\\scratchpad\\\\test_fixes.py\" 2>&1)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe \"C:\\\\Users\\\\krish\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Tech-MiraeVaani-MiraeVaani6-0\\\\8f9b951b-ed34-4999-b610-5f00b76dd065\\\\scratchpad\\\\test_xai.py\" 2>&1)"
+    ]
+  }
+}

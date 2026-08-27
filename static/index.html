@@ -206,10 +206,15 @@
   <!-- ================= CREDENTIALS ================= -->
   <section id="view-credentials" class="view">
     <div class="view-head"><h2>Credentials</h2>
-      <button class="btn primary" id="save-credentials">Save</button></div>
+      <div class="row-gap">
+        <button class="btn ghost" id="test-credentials">Test saved keys</button>
+        <button class="btn primary" id="save-credentials">Save</button>
+      </div>
+    </div>
     <p class="note wide-note">
       Keys are encrypted before they're written to disk and are never sent back to
-      the browser in full. Leave a field blank to keep the saved value.
+      the browser in full. Leave a field blank to keep the saved value. Every key is
+      checked against its provider on save — one the provider rejects is not stored.
     </p>
     <div class="panel">
       <h3>AI providers</h3>
@@ -222,7 +227,7 @@
         <label>Auth token <input id="tw-token" type="password" placeholder="leave blank to keep"></label>
       </div>
       <label>From number <input id="tw-from" type="tel" placeholder="+1XXXXXXXXXX"></label>
-      <p class="note" id="tw-status"></p>
+      <p class="note cred-status" id="tw-status" data-status-for="twilio"></p>
     </div>
   </section>
 

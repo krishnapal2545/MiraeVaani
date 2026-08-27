@@ -88,6 +88,16 @@ class GoogleTTS(TTSProvider):
                 GOOGLE_TTS_URL, params={"key": self._api_key}, json=payload
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Google's message names the real problem (wrong key type, API not
+            # enabled, quota); the traceback alone never does.
+            logger.error(
+                "Google TTS %s for %s...: %s",
+                exc.response.status_code,
+                text[:50],
+                exc.response.text[:500],
+            )
+            return None
         except httpx.HTTPError:
             logger.exception("Google TTS failed for: %s...", text[:50])
             return None

@@ -9,6 +9,7 @@ Endpoints:
     GET  /api/catalog               providers, models, voices, languages, starters
     CRUD /api/agents                agent configuration
     CRUD /api/credentials           provider API keys (write-only, masked on read)
+    POST /api/credentials/test      re-check the stored keys against the providers
     POST /api/tts/preview           voice sample for the builder
     POST /api/call                  place an outbound call with an agent
     GET  /api/calls[/{id}]          call history and detail
@@ -20,8 +21,10 @@ Endpoints:
 import asyncio
 import json
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -34,7 +37,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from twilio.rest import Client as TwilioClient
 
-from app import db, registry
+from app import db, registry, verify
 from app.audio import mulaw_to_pcm, pcm_to_wav_bytes
 from app.call_handler import CallSession
 from app.config import get_settings
@@ -55,9 +58,18 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-# call_id -> {agent_id, variables}. Read, never popped: v5 popped this, so a
-# Twilio websocket reconnect lost the call's context and killed the call.
+# call_id -> {agent_id, variables}. A cache in front of the calls table, not the
+# source of truth: v5 popped an entry when the stream ended, so a Twilio
+# websocket reconnect lost the call's context and killed the call. Entries are
+# only evicted once CALL_CONTEXT_LIMIT newer calls exist.
 CALL_CONTEXTS: dict[str, dict] = {}
+CALL_CONTEXT_LIMIT = 500
+
+
+def _remember_context(call_id: str, context: dict) -> None:
+    CALL_CONTEXTS[call_id] = context
+    while len(CALL_CONTEXTS) > CALL_CONTEXT_LIMIT:
+        CALL_CONTEXTS.pop(next(iter(CALL_CONTEXTS)), None)
 
 
 @asynccontextmanager
@@ -79,12 +91,46 @@ async def health():
 # ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
+# provider -> (fetched_at, model ids). Live lists keep the dropdown honest
+# without an HTTP round trip on every page load.
+_MODEL_CACHE: dict[str, tuple[float, list[str]]] = {}
+MODEL_CACHE_TTL = 300.0
+
+
+async def _live_models(provider: str, credential: str) -> list[str] | None:
+    cached = _MODEL_CACHE.get(provider)
+    if cached and (time.monotonic() - cached[0]) < MODEL_CACHE_TTL:
+        return cached[1] or None
+
+    models = await verify.list_llm_models(provider, db.get_credential(credential))
+    # Failures are cached too, or a provider that cannot list (xAI without
+    # credits) is re-probed on every page load.
+    _MODEL_CACHE[provider] = (time.monotonic(), models or [])
+    return models
+
+
+async def _llm_catalog() -> list[dict]:
+    """The static list is the fallback; the provider's own list wins.
+
+    Model ids get retired — Groq dropped the llama-3.x ids this app shipped
+    with — and a stale dropdown entry only fails once a call is already live.
+    """
+    entries = registry.CATALOG["llm"]
+    listings = await asyncio.gather(
+        *(_live_models(e["provider"], e["credential"]) for e in entries)
+    )
+    return [
+        {**entry, "models": models or entry["models"], "models_live": bool(models)}
+        for entry, models in zip(entries, listings)
+    ]
+
+
 @app.get("/api/catalog")
 async def get_catalog():
     saved = set(db.list_credential_providers())
     return {
         "stt": registry.CATALOG["stt"],
-        "llm": registry.CATALOG["llm"],
+        "llm": await _llm_catalog(),
         "tts": registry.CATALOG["tts"],
         "languages": registry.LANGUAGES,
         "starters": STARTER_PROMPTS,
@@ -120,11 +166,29 @@ async def get_credentials():
 
 @app.post("/api/credentials")
 async def save_credentials(request: Request):
-    body = await request.json()
+    """Save keys, but probe each one against its provider first.
 
-    for key, value in (body.get("providers") or {}).items():
-        if value:  # empty means "leave unchanged"
-            db.set_credential(key, value.strip())
+    A key the provider rejects outright is not written: storing it only defers
+    the failure to the middle of a call, where it looks like dead air.
+    """
+    body = await request.json()
+    check = body.get("verify", True)
+
+    incoming = {
+        key: value.strip()
+        for key, value in (body.get("providers") or {}).items()
+        if value and value.strip()  # empty means "leave unchanged"
+    }
+    results = await verify.verify_many(incoming) if check else {}
+
+    saved: list[str] = []
+    rejected: list[str] = []
+    for key, secret in incoming.items():
+        if results.get(key) and results[key].rejected:
+            rejected.append(key)
+            continue
+        db.set_credential(key, secret)
+        saved.append(key)
 
     twilio_in = body.get("twilio") or {}
     if twilio_in:
@@ -134,9 +198,44 @@ async def save_credentials(request: Request):
             "auth_token": twilio_in.get("auth_token") or existing.get("auth_token", ""),
             "from_number": twilio_in.get("from_number") or existing.get("from_number", ""),
         }
-        db.set_credential_json("twilio", merged)
+        if any(merged.values()):
+            result = (
+                await verify.verify_twilio(**merged)
+                if check
+                else verify.VerifyResult(verify.UNKNOWN, "Not checked.")
+            )
+            results["twilio"] = result
+            if result.rejected:
+                rejected.append("twilio")
+            else:
+                db.set_credential_json("twilio", merged)
+                saved.append("twilio")
 
-    return {"status": "saved"}
+    return {
+        "status": "saved" if not rejected else "partial",
+        "saved": saved,
+        "rejected": rejected,
+        "results": verify.summarize(results),
+    }
+
+
+@app.post("/api/credentials/test")
+async def test_credentials():
+    """Re-check what is already stored, without changing anything."""
+    stored = {
+        slot["key"]: db.get_credential(slot["key"]) for slot in registry.credential_slots()
+    }
+    results = await verify.verify_many({k: v for k, v in stored.items() if v})
+
+    twilio = db.get_credential_json("twilio")
+    if twilio.get("account_sid") or twilio.get("auth_token"):
+        results["twilio"] = await verify.verify_twilio(
+            twilio.get("account_sid", ""),
+            twilio.get("auth_token", ""),
+            twilio.get("from_number", ""),
+        )
+
+    return {"results": verify.summarize(results)}
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +331,23 @@ async def initiate_call(req: CallRequest):
     except MissingCredential as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
+    # A retired model id is indistinguishable from a working agent until the
+    # caller picks up and every turn 404s into the fallback line.
+    credential = registry.credential_key("llm", agent.llm_provider)
+    available = await _live_models(agent.llm_provider, credential) if credential else None
+    if available and agent.llm_model not in available:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": (
+                    f"'{agent.llm_model}' is not available on your {agent.llm_provider} "
+                    f"account. Edit the agent and pick one of: {', '.join(available[:8])}"
+                )
+            },
+        )
+
     call_id = uuid.uuid4().hex[:16]
-    CALL_CONTEXTS[call_id] = {"agent_id": agent.id, "variables": req.variables}
+    _remember_context(call_id, {"agent_id": agent.id, "variables": req.variables})
     db.create_call(call_id, agent.id, req.to, req.variables)
 
     base = settings.BASE_URL.rstrip("/")
@@ -311,14 +425,21 @@ async def twilio_voice_webhook(request: Request):
         .replace("http://", "ws://")
         + "/api/twilio/media-stream"
     )
+    # The id travels three ways on purpose: a custom parameter, the stream URL's
+    # query string, and (in the DB) the CallSid. Twilio has been seen to deliver
+    # a start frame with no customParameters at all, which used to strand the
+    # call on "No agent for call_id=".
+    safe_id = escape(call_id, quote=True)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{ws_url}">
-            <Parameter name="call_id" value="{call_id}"/>
+        <Stream url="{ws_url}?call_id={safe_id}">
+            <Parameter name="call_id" value="{safe_id}"/>
         </Stream>
     </Connect>
 </Response>"""
+    if not call_id:
+        logger.warning("Voice webhook hit without a call_id: %s", request.url)
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -342,26 +463,78 @@ async def twilio_status_callback(request: Request):
 # ---------------------------------------------------------------------------
 # Twilio Media Stream WebSocket
 # ---------------------------------------------------------------------------
+def _normalize(name: str) -> str:
+    """'Call_Id', 'callId' and 'call_id' all have to mean the same thing."""
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _resolve_call_context(start: dict, websocket: WebSocket) -> tuple[str, dict]:
+    """Work out which call this stream belongs to, cheapest source first.
+
+    Custom parameters are the intended channel, but they are the one part of the
+    start frame Twilio has been observed to drop, so the stream URL's query
+    string and finally the CallSid (always present) back them up. The DB is
+    consulted when the in-memory context is gone — a server restart between
+    dialing and answering used to be fatal.
+    """
+    params = {_normalize(k): v for k, v in (start.get("customParameters") or {}).items()}
+    call_id = params.get("callid") or websocket.query_params.get("call_id", "") or ""
+
+    if call_id and call_id in CALL_CONTEXTS:
+        return call_id, CALL_CONTEXTS[call_id]
+
+    record = db.get_call(call_id) if call_id else None
+    if record is None:
+        call_sid = start.get("callSid") or ""
+        record = db.find_call_by_sid(call_sid) if call_sid else None
+        if record is not None:
+            logger.warning(
+                "Stream carried no usable call_id; recovered %s from CallSid %s",
+                record["id"],
+                call_sid,
+            )
+
+    if record is None:
+        return call_id, {}
+
+    try:
+        variables = json.loads(record.get("variables") or "{}")
+    except json.JSONDecodeError:
+        variables = {}
+    context = {"agent_id": record["agent_id"], "variables": variables}
+    _remember_context(record["id"], context)
+    return record["id"], context
+
+
 @app.websocket("/api/twilio/media-stream")
 async def twilio_media_stream(websocket: WebSocket):
     await websocket.accept()
 
-    # Peek the first frame to learn which call (and therefore which agent) this is.
+    # Twilio sends a "connected" frame before "start", so read until the start
+    # frame arrives — that is the one carrying our custom parameters.
+    first = None
     try:
-        first_raw = await websocket.receive_text()
-        first = json.loads(first_raw)
+        for _ in range(10):
+            message = json.loads(await websocket.receive_text())
+            if message.get("event") == "start":
+                first = message
+                break
     except Exception:
+        first = None
+
+    if first is None:
+        logger.error("No start frame on media stream — closing")
         await websocket.close()
         return
 
-    call_id = ""
-    if first.get("event") == "start":
-        call_id = (first["start"].get("customParameters") or {}).get("call_id", "")
-
-    context = CALL_CONTEXTS.get(call_id) or {}
+    call_id, context = _resolve_call_context(first["start"], websocket)
     agent = db.get_agent(context.get("agent_id", "")) if context else None
     if agent is None:
-        logger.error("No agent for call_id=%s — closing stream", call_id)
+        logger.error(
+            "No agent for call_id=%r — closing stream. start frame=%s",
+            call_id,
+            json.dumps(first["start"], default=str)[:600],
+        )
         await websocket.close()
         return
 
@@ -407,8 +580,6 @@ async def twilio_media_stream(websocket: WebSocket):
         logger.info("WebSocket disconnected")
     except Exception:
         logger.exception("Media stream error")
-    finally:
-        CALL_CONTEXTS.pop(call_id, None)
 
 
 # ---------------------------------------------------------------------------

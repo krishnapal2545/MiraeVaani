@@ -78,6 +78,7 @@ class DialogEngine:
         self._history.append({"role": "user", "content": user_text})
 
         reply = ""
+        error = ""
         for _ in range(MAX_TOOL_ROUNDS):
             response = await self._llm.complete(
                 self._history,
@@ -87,6 +88,7 @@ class DialogEngine:
                 max_output_tokens=self._max_output_tokens,
             )
             reply = response.text
+            error = response.error
 
             if not response.tool_calls:
                 break
@@ -105,6 +107,13 @@ class DialogEngine:
                 })
 
             # Loop once more so the model can speak after acting.
+
+        if not reply:
+            # The caller hears the fallback either way; the UI and the log
+            # should still say whether the model failed or just said nothing.
+            logger.warning("Falling back — LLM returned nothing. %s", error or "(no error)")
+            if self._on_event:
+                self._on_event("llm_error", {"error": error or "empty response"})
 
         reply = reply or FALLBACK_REPLY
         self._history.append({"role": "assistant", "content": reply})

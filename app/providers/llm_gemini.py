@@ -109,9 +109,9 @@ class GeminiLLM(LLMProvider):
                 contents=self._to_contents(messages),
                 config=self._to_config(system, tools, temperature, max_output_tokens),
             )
-        except Exception:
-            logger.exception("Gemini request failed")
-            return LLMReply()
+        except Exception as exc:
+            logger.error("Gemini request failed: %s", exc)
+            return LLMReply(error=str(exc))
 
         text_parts: list[str] = []
         calls: list[ToolCall] = []

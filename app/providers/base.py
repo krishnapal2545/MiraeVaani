@@ -25,6 +25,10 @@ class ToolCall:
 class LLMReply:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # Why the reply is empty, when it is empty. A silent fallback line on every
+    # turn (a retired model id, an unfunded account) is otherwise invisible to
+    # anyone watching the call in the UI.
+    error: str = ""
 
 
 # Canonical tool definitions (JSON Schema). v5 kept a hand-maintained Groq copy

@@ -13,6 +13,7 @@ from app.models import AgentConfig
 from app.providers.base import LLMProvider, STTProvider, TTSProvider
 from app.providers.llm_gemini import GeminiLLM
 from app.providers.llm_groq import GroqLLM
+from app.providers.llm_xai import XaiLLM
 from app.providers.stt_google import GoogleSTT
 from app.providers.stt_sarvam import SarvamSTT
 from app.providers.tts_bhashini import VOICES as BHASHINI_VOICES, BhashiniTTS
@@ -69,14 +70,23 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
         },
         {
             "provider": "groq",
-            "label": "Groq",
+            "label": "Groq (Llama)",
             "credential": "groq",
-            "models": [
-                "llama-3.1-8b-instant",
-                "llama-3.3-70b-versatile",
-                "openai/gpt-oss-20b",
-            ],
-            "note": "Fastest time-to-first-token in the catalog.",
+            # Fallback only — /api/catalog replaces this with the account's own
+            # list. The llama-3.x ids that used to be here have been retired.
+            "models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "groq/compound-mini"],
+            "note": "Fastest time-to-first-token in the catalog. Key starts 'gsk_'.",
+        },
+        {
+            "provider": "xai",
+            "label": "xAI Grok",
+            "credential": "xai",
+            "models": ["grok-4.6", "grok-4-fast", "grok-3-mini"],
+            "note": (
+                "Different company from Groq — key starts 'xai-' and needs credits "
+                "on console.x.ai. GET https://api.x.ai/v1/models lists what your "
+                "team can actually run."
+            ),
         },
     ],
     "tts": [
@@ -103,6 +113,12 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
         },
     ],
 }
+
+
+def credential_key(kind: str, provider: str) -> str:
+    """Which credential slot a provider draws from ('' if unknown)."""
+    entry = next((e for e in CATALOG[kind] if e["provider"] == provider), None)
+    return entry["credential"] if entry else ""
 
 
 def _credential_for(kind: str, provider: str) -> str:
@@ -142,6 +158,8 @@ def build_llm(agent: AgentConfig) -> LLMProvider:
     key = _credential_for("llm", agent.llm_provider)
     if agent.llm_provider == "groq":
         return GroqLLM(api_key=key, model=agent.llm_model)
+    if agent.llm_provider == "xai":
+        return XaiLLM(api_key=key, model=agent.llm_model)
     return GeminiLLM(api_key=key, model=agent.llm_model)
 
 
@@ -157,5 +175,6 @@ def credential_slots() -> list[dict[str, str]]:
         {"key": "bhashini", "label": "Bhashini AI", "hint": "TTS only"},
         {"key": "google", "label": "Google Cloud", "hint": "API key for Speech-to-Text and Text-to-Speech"},
         {"key": "gemini", "label": "Google Gemini", "hint": "AI Studio API key"},
-        {"key": "groq", "label": "Groq", "hint": "console.groq.com API key"},
+        {"key": "groq", "label": "Groq (Llama)", "hint": "console.groq.com key — starts 'gsk_'"},
+        {"key": "xai", "label": "xAI Grok", "hint": "console.x.ai key — starts 'xai-'"},
     ]
