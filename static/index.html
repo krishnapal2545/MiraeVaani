@@ -4,32 +4,109 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MiraeVaani — Voice Agents</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/images/vaani_logo.jpg">
+<link rel="stylesheet" href="/static/style.css?v=6.3.1">
+<script>
+  /* Applied before first paint so a dark-theme reload never flashes white. */
+  try {
+    document.documentElement.dataset.theme =
+      localStorage.getItem("mv-theme") === "dark" ? "dark" : "light";
+  } catch (e) { document.documentElement.dataset.theme = "light"; }
+</script>
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="logo">◈</span>
-    <div>
-      <h1>MiraeVaani</h1>
-      <p>Configurable multilingual voice agents</p>
-    </div>
-  </div>
-  <nav class="tabs">
-    <button class="tab active" data-view="agents">Agents</button>
-    <button class="tab" data-view="calls">Calls</button>
-    <button class="tab" data-view="credentials">Credentials</button>
-  </nav>
-</header>
+<div class="shell">
 
-<main>
+  <!-- ================= SIDEBAR ================= -->
+  <aside class="sidebar">
+    <!-- root mode: the whole product -->
+    <div id="root-nav">
+      <div class="brand">
+        <img class="logo-mark" src="/static/images/vaani_logo.jpg" alt="">
+        <div>
+          <h1>MiraeVaani</h1>
+          <p>Voice agents</p>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <p class="nav-group">Build</p>
+        <button class="nav-item active" data-view="agents">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="3"/><circle cx="17" cy="7" r="2"/><circle cx="16" cy="16" r="3"/><path d="M10.5 10 14 14"/></svg>
+          <span>Agents</span>
+        </button>
+
+      </nav>
+    </div>
+
+    <!-- agent mode: one agent's own workspace -->
+    <div id="agent-nav" class="hidden">
+      <button class="back-link" id="back-to-agents">
+        <span>←</span> Back to agents
+      </button>
+      <div class="agent-badge">
+        <img class="logo-mark sm" src="/static/images/vaani_logo.jpg" alt="">
+        <span id="agent-nav-name">New agent</span>
+      </div>
+
+      <nav class="nav">
+        <p class="nav-group">Agent settings</p>
+        <button class="nav-item active" data-pane="prompt">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 8v8M13 6v12M17 9v6M21 11v2"/></svg>
+          <span>Prompt</span>
+        </button>
+        <button class="nav-item" data-pane="speech">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10.5a3 3 0 1 1-3-3h3"/><path d="M15 7.5a5 5 0 0 1 0 7"/><path d="M17.8 5a9 9 0 0 1 0 12"/></svg>
+          <span>Speech</span>
+        </button>
+        <button class="nav-item" data-pane="turns">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h3l2.5-6 3.5 13 2.5-7H20"/></svg>
+          <span>Turn taking</span>
+        </button>
+        <button class="nav-item" data-pane="conversations">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H9l-5 4Z"/></svg>
+          <span>Conversations</span>
+        </button>
+      </nav>
+    </div>
+
+    <!-- pinned to the bottom of the sidebar, reachable from every screen -->
+    <div class="sidebar-foot">
+      <button class="nav-item" data-view="credentials">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-3-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.3 7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.6 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+        <span>Settings</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ================= CONTENT ================= -->
+  <div class="content">
+    <header class="topbar">
+      <span class="crumb" id="crumb">Agents</span>
+      <button class="theme-switch" id="theme-toggle" type="button"
+              role="switch" aria-checked="false" title="Switch theme">
+        <span class="switch-label" id="theme-label">Light</span>
+        <span class="switch-track"><span class="switch-knob" id="theme-icon">☀</span></span>
+      </button>
+    </header>
+
+    <main>
 
   <!-- ================= AGENTS LIST ================= -->
   <section id="view-agents" class="view active">
     <div class="view-head">
-      <h2>Your agents</h2>
-      <button class="btn primary" id="new-agent">+ New agent</button>
+      <div>
+        <h2>Your agents</h2>
+        <p class="subtitle">Build voice agents that talk, automate tasks, and improve over time.</p>
+      </div>
+      <div class="row-gap">
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+          <input id="agent-search" type="search" placeholder="Search agents" autocomplete="off">
+        </label>
+        <button class="btn primary" id="new-agent">Create agent</button>
+      </div>
     </div>
     <div id="agent-list" class="cards"></div>
     <p id="agents-empty" class="empty hidden">
@@ -38,154 +115,211 @@
     </p>
   </section>
 
-  <!-- ================= AGENT BUILDER ================= -->
+  <!-- ================= AGENT WORKSPACE ================= -->
   <section id="view-builder" class="view">
     <div class="view-head">
-      <h2 id="builder-title">New agent</h2>
+      <div>
+        <h2 id="builder-title">New agent</h2>
+        <p class="subtitle" id="builder-subtitle">Configure how this agent speaks and what it says.</p>
+      </div>
       <div class="row-gap">
+        <button class="btn ghost" id="builder-call">▶ Test agent</button>
         <button class="btn ghost" id="builder-cancel">Cancel</button>
         <button class="btn primary" id="builder-save">Save agent</button>
       </div>
     </div>
 
-    <div class="builder-grid">
-      <div class="panel">
-        <h3>Identity</h3>
-        <label>Agent name
-          <input id="f-name" type="text" placeholder="Margin shortfall caller">
-        </label>
+    <!-- ---- pane: prompt ---- -->
+    <div class="pane-view active" data-pane="prompt">
+      <div class="workspace-grid">
+        <div>
+          <div class="panel">
+            <div class="row-between">
+              <h3>Agent prompt</h3>
+              <label class="inline-select">Start from
+                <select id="f-starter"><option value="">— template —</option></select>
+              </label>
+            </div>
+            <p class="note">The system prompt this agent follows on every call.</p>
+            <textarea id="f-prompt" rows="20" spellcheck="false"
+              placeholder="Describe who the agent is, the scenario, and the call flow. Use $variables for per-call values."></textarea>
+            <p class="note">
+              Use <code>$customer_name</code> style placeholders — they're filled in when
+              you place a call. Detected variables:
+              <span id="prompt-vars" class="vars">none</span>
+            </p>
+          </div>
 
-        <h3>Speech to text</h3>
-        <div class="two">
-          <label>Provider <select id="f-stt-provider"></select></label>
-          <label>Model <select id="f-stt-model"></select></label>
+          <div class="panel">
+            <h3>First message</h3>
+            <p class="note">How the agent opens the conversation.</p>
+            <div class="two">
+              <label>Mode
+                <select id="f-greeting-mode">
+                  <option value="llm">Let the model open the call</option>
+                  <option value="static">Fixed opening line</option>
+                </select>
+              </label>
+              <label>Opening line <input id="f-greeting-text" type="text" placeholder="Namaste, main Vaani bol rahi hoon..."></label>
+            </div>
+          </div>
         </div>
-        <p class="note" id="stt-note"></p>
 
-        <h3>Language</h3>
-        <div class="two">
-          <label>Mode
-            <select id="f-language-mode">
-              <option value="auto">Auto-detect per utterance</option>
-              <option value="fixed">Fixed language</option>
-            </select>
+        <div class="rail">
+          <div class="panel">
+            <h3>Identity</h3>
+            <label>Agent name
+              <input id="f-name" type="text" placeholder="Margin shortfall caller">
+            </label>
+          </div>
+
+          <div class="panel">
+            <h3>Model</h3>
+            <p class="note">The language model that powers this agent.</p>
+            <label>Provider <select id="f-llm-provider"></select></label>
+            <label>Model <select id="f-llm-model"></select></label>
+            <div class="two">
+              <label>Temperature <input id="f-temperature" type="number" step="0.1" min="0" max="2"></label>
+              <label>Max reply tokens <input id="f-max-tokens" type="number" min="30" max="500"></label>
+            </div>
+            <p class="note" id="llm-note"></p>
+          </div>
+
+          <div class="panel">
+            <h3>Languages</h3>
+            <label>Mode
+              <select id="f-language-mode">
+                <option value="auto">Auto-detect per utterance</option>
+                <option value="fixed">Fixed language</option>
+              </select>
+            </label>
+            <label>Primary language <select id="f-language"></select></label>
+            <label>Allowed languages (auto mode)
+              <select id="f-allowed-languages" multiple size="5"></select>
+            </label>
+            <div class="two">
+              <label>Turns before switching <input id="f-lang-switch-turns" type="number" min="1" max="5"></label>
+              <label>Ignore clips under (s) <input id="f-lang-switch-secs" type="number" step="0.1" min="0" max="4"></label>
+            </div>
+            <p class="note">Auto follows the caller, but only after the same language is
+              detected on consecutive turns — one bad guess on a short clip no longer
+              flips the call. Select nothing to allow every language the STT can return.</p>
+          </div>
+
+          <div class="panel">
+            <h3>Voice</h3>
+            <label>Provider <select id="f-tts-provider"></select></label>
+            <label>Voice <select id="f-tts-voice"></select></label>
+            <div class="row-gap">
+              <button class="btn ghost small" id="preview-voice">▶ Preview voice</button>
+              <span class="note inline" id="preview-status"></span>
+            </div>
+            <p class="note" id="tts-note"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- pane: speech ---- -->
+    <div class="pane-view" data-pane="speech">
+      <div class="builder-grid">
+        <div class="panel">
+          <h3>Speech to text</h3>
+          <div class="two">
+            <label>Provider <select id="f-stt-provider"></select></label>
+            <label>Model <select id="f-stt-model"></select></label>
+          </div>
+          <p class="note" id="stt-note"></p>
+
+          <h3>Smart fillers</h3>
+          <label class="check">
+            <input id="f-fillers" type="checkbox" checked>
+            <span>Speak a short filler when the reply is slow</span>
           </label>
-          <label>Language <select id="f-language"></select></label>
+          <label>Wait before filler — <b id="filler-delay-label">350</b> ms
+            <input id="f-filler-delay" type="range" min="150" max="1200" step="50">
+          </label>
+          <p class="note">Fillers are pre-synthesized when the call starts and chosen
+            from what the caller just said. If the reply arrives first, none is played.</p>
         </div>
-        <label>Allowed languages (auto mode)
-          <select id="f-allowed-languages" multiple size="6"></select>
-        </label>
-        <div class="two">
-          <label>Turns before switching <input id="f-lang-switch-turns" type="number" min="1" max="5"></label>
-          <label>Ignore clips under (s) <input id="f-lang-switch-secs" type="number" step="0.1" min="0" max="4"></label>
-        </div>
-        <p class="note">Auto follows the caller, but only after the same language is
-          detected on consecutive turns — one bad guess on a short clip no longer flips
-          the call. Select nothing to allow every language the STT can return.
-          Fixed ignores detection entirely.</p>
 
-        <h3>Language model</h3>
-        <div class="two">
-          <label>Provider <select id="f-llm-provider"></select></label>
-          <label>Model <select id="f-llm-model"></select></label>
+        <div class="panel">
+          <h3>Delivery</h3>
+          <div class="two">
+            <label>Speaking rate <input id="f-tts-rate" type="number" step="0.05" min="0.5" max="1.6"></label>
+            <label>Pitch (semitones) <input id="f-tts-pitch" type="number" step="0.5" min="-10" max="10"></label>
+          </div>
+          <label>Pause length for "..." (ms)
+            <input id="f-tts-pause" type="number" step="50" min="0" max="1500">
+          </label>
+          <p class="note">The agent writes "..." where a person would pause. Slightly
+            under 1.0 rate reads as considered rather than rushed. The voice follows the
+            language actually being spoken, not the one selected here — the Prompt tab
+            picks the voice for the agent's own language.</p>
         </div>
-        <div class="two">
-          <label>Temperature <input id="f-temperature" type="number" step="0.1" min="0" max="2"></label>
-          <label>Max reply tokens <input id="f-max-tokens" type="number" min="30" max="500"></label>
-        </div>
-        <p class="note" id="llm-note"></p>
       </div>
+    </div>
 
+    <!-- ---- pane: turn taking ---- -->
+    <div class="pane-view" data-pane="turns">
+      <div class="builder-grid">
+        <div class="panel">
+          <h3>Turn detection</h3>
+          <div class="two">
+            <label>Minimum threshold (RMS) <input id="f-rms" type="number" min="50" max="2000"></label>
+            <label>End of turn (s) <input id="f-silence" type="number" step="0.1" min="0.2" max="3"></label>
+          </div>
+          <div class="two">
+            <label>Noise margin (× room) <input id="f-noise-margin" type="number" step="0.1" min="1.1" max="6"></label>
+            <label>Min utterance (s) <input id="f-min-utterance" type="number" step="0.1" min="0.1" max="2"></label>
+          </div>
+          <div class="two">
+            <label>Barge-in after (s) <input id="f-barge" type="number" step="0.05" min="0.1" max="2"></label>
+            <label>Barge-in grace (s) <input id="f-barge-grace" type="number" step="0.1" min="0" max="3"></label>
+          </div>
+          <p class="note">The live threshold tracks the room and sits this many times
+            above it, so the RMS box is a floor rather than the whole rule. Raise the
+            noise margin when background voices are getting answered; raise barge-in
+            seconds when the agent is cut off by coughs or line echo.</p>
+        </div>
+
+        <div class="panel">
+          <h3>Silence handling</h3>
+          <div class="two">
+            <label>Check "can you hear me?" after (s) <input id="f-no-reply" type="number" step="0.5" min="0" max="30"></label>
+            <label>Check-ins before hanging up <input id="f-no-reply-prompts" type="number" min="1" max="5"></label>
+          </div>
+          <p class="note">When nothing comes back for the check interval the agent asks
+            whether it can be heard — and if audio was heard but discarded, it asks the
+            caller to speak louder instead. Set the interval to 0 to never ask.</p>
+
+          <h3>Escalation</h3>
+          <label>Redirect number (human handoff)
+            <input id="f-redirect" type="text" placeholder="+9198XXXXXXXX">
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- pane: conversations ---- -->
+    <div class="pane-view" data-pane="conversations">
       <div class="panel">
-        <h3>Text to speech</h3>
-        <div class="two">
-          <label>Provider <select id="f-tts-provider"></select></label>
-          <label>Voice <select id="f-tts-voice"></select></label>
-        </div>
-        <div class="row-gap">
-          <button class="btn ghost small" id="preview-voice">▶ Preview voice</button>
-          <span class="note inline" id="preview-status"></span>
-        </div>
-        <p class="note" id="tts-note"></p>
-        <div class="two">
-          <label>Speaking rate <input id="f-tts-rate" type="number" step="0.05" min="0.5" max="1.6"></label>
-          <label>Pitch (semitones) <input id="f-tts-pitch" type="number" step="0.5" min="-10" max="10"></label>
-        </div>
-        <label>Pause length for "..." (ms)
-          <input id="f-tts-pause" type="number" step="50" min="0" max="1500">
-        </label>
-        <p class="note">The agent writes "..." where a person would pause. Slightly
-          under 1.0 rate reads as considered rather than rushed. The voice follows the
-          language actually being spoken, not the one selected here — this picks the
-          voice for the agent's own language.</p>
-
-        <h3>Smart fillers</h3>
-        <label class="check">
-          <input id="f-fillers" type="checkbox" checked>
-          <span>Speak a short filler when the reply is slow</span>
-        </label>
-        <label>Wait before filler — <b id="filler-delay-label">350</b> ms
-          <input id="f-filler-delay" type="range" min="150" max="1200" step="50">
-        </label>
-        <p class="note">Fillers are pre-synthesized when the call starts and chosen
-          from what the caller just said. If the reply arrives first, none is played.</p>
-
-        <h3>Turn detection</h3>
-        <div class="two">
-          <label>Minimum threshold (RMS) <input id="f-rms" type="number" min="50" max="2000"></label>
-          <label>End of turn (s) <input id="f-silence" type="number" step="0.1" min="0.2" max="3"></label>
-        </div>
-        <div class="two">
-          <label>Noise margin (× room) <input id="f-noise-margin" type="number" step="0.1" min="1.1" max="6"></label>
-          <label>Min utterance (s) <input id="f-min-utterance" type="number" step="0.1" min="0.1" max="2"></label>
-        </div>
-        <div class="two">
-          <label>Barge-in after (s) <input id="f-barge" type="number" step="0.05" min="0.1" max="2"></label>
-          <label>Barge-in grace (s) <input id="f-barge-grace" type="number" step="0.1" min="0" max="3"></label>
-        </div>
-        <div class="two">
-          <label>Check "can you hear me?" after (s) <input id="f-no-reply" type="number" step="0.5" min="0" max="30"></label>
-          <label>Check-ins before hanging up <input id="f-no-reply-prompts" type="number" min="1" max="5"></label>
-        </div>
-        <p class="note">The live threshold tracks the room and sits this many times
-          above it, so the RMS box is a floor rather than the whole rule. Raise the
-          noise margin when background voices are getting answered; raise barge-in
-          seconds when the agent is cut off by coughs or line echo.
-          When nothing comes back for the check interval the agent asks whether it
-          can be heard — and if audio was heard but discarded, it asks the caller to
-          speak louder instead. Set the interval to 0 to never ask.</p>
-
-        <h3>Escalation</h3>
-        <label>Redirect number (human handoff)
-          <input id="f-redirect" type="text" placeholder="+9198XXXXXXXX">
-        </label>
-      </div>
-
-      <div class="panel wide">
         <div class="row-between">
-          <h3>Instructions</h3>
-          <label class="inline-select">Start from
-            <select id="f-starter"><option value="">— template —</option></select>
-          </label>
+          <h3>Call logs</h3>
+          <button class="btn ghost small" id="refresh-agent-calls">Refresh</button>
         </div>
-        <textarea id="f-prompt" rows="18" spellcheck="false"
-          placeholder="Describe who the agent is, the scenario, and the call flow. Use $variables for per-call values."></textarea>
-        <p class="note">
-          Use <code>$customer_name</code> style placeholders — they're filled in when
-          you place a call. Detected variables:
-          <span id="prompt-vars" class="vars">none</span>
-        </p>
-
-        <h3>Greeting</h3>
-        <div class="two">
-          <label>Mode
-            <select id="f-greeting-mode">
-              <option value="llm">Let the model open the call</option>
-              <option value="static">Fixed opening line</option>
-            </select>
-          </label>
-          <label>Opening line <input id="f-greeting-text" type="text" placeholder="Namaste, main Vaani bol rahi hoon..."></label>
+        <p class="note">Every call placed with this agent. Open one to read the
+          transcript, replay the audio and inspect per-turn latency.</p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th>Call date</th><th>To</th><th>Status</th>
+              <th>Turns</th><th>Duration</th><th>Outcome</th><th></th>
+            </tr></thead>
+            <tbody id="agent-calls-body"></tbody>
+          </table>
         </div>
+        <p id="agent-calls-empty" class="empty hidden">No calls with this agent yet.</p>
       </div>
     </div>
   </section>
@@ -194,7 +328,7 @@
   <section id="view-call" class="view">
     <div class="view-head">
       <h2>Call — <span id="call-agent-name"></span></h2>
-      <button class="btn ghost" id="call-back">← Back to agents</button>
+      <button class="btn ghost" id="call-back">← Back to agent</button>
     </div>
 
     <div class="call-grid">
@@ -224,27 +358,13 @@
     </div>
   </section>
 
-  <!-- ================= CALLS HISTORY ================= -->
-  <section id="view-calls" class="view">
-    <div class="view-head"><h2>Call history</h2>
-      <button class="btn ghost" id="refresh-calls">Refresh</button></div>
-    <table class="table">
-      <thead><tr>
-        <th>When</th><th>Agent</th><th>To</th><th>Status</th>
-        <th>Turns</th><th>Outcome</th><th></th>
-      </tr></thead>
-      <tbody id="calls-body"></tbody>
-    </table>
-    <div id="call-detail" class="panel hidden">
-      <div class="row-between"><h3>Transcript</h3>
-        <button class="btn ghost small" id="close-detail">Close</button></div>
-      <div id="detail-transcript" class="transcript"></div>
-    </div>
-  </section>
-
   <!-- ================= CREDENTIALS ================= -->
   <section id="view-credentials" class="view">
-    <div class="view-head"><h2>Credentials</h2>
+    <div class="view-head">
+      <div>
+        <h2>Settings</h2>
+        <p class="subtitle">Provider keys and telephony used to place and run calls.</p>
+      </div>
       <div class="row-gap">
         <button class="btn ghost" id="test-credentials">Test saved keys</button>
         <button class="btn primary" id="save-credentials">Save</button>
@@ -270,9 +390,48 @@
     </div>
   </section>
 
-</main>
+    </main>
+  </div>
+</div>
+
+<!-- ================= CALL DRAWER ================= -->
+<div id="call-drawer" class="drawer hidden">
+  <div class="drawer-scrim" id="drawer-scrim"></div>
+  <aside class="drawer-panel">
+    <header class="drawer-head">
+      <div class="drawer-title">
+        <img class="logo-mark sm" src="/static/images/vaani_logo.jpg" alt="">
+        <div>
+          <h3>Conversation with agent</h3>
+          <p class="note" id="drawer-sub"></p>
+        </div>
+      </div>
+      <button class="btn ghost small" id="drawer-close">✕</button>
+    </header>
+
+    <div class="drawer-body">
+      <div id="drawer-audio" class="audio-block"></div>
+
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-tab="transcript">Transcript</button>
+        <button class="drawer-tab" data-tab="overview">Overview</button>
+        <button class="drawer-tab" data-tab="metrics">Turn latency</button>
+      </div>
+
+      <div class="drawer-pane active" data-tab="transcript">
+        <div id="detail-transcript" class="transcript"></div>
+      </div>
+      <div class="drawer-pane" data-tab="overview">
+        <dl id="detail-overview" class="facts"></dl>
+      </div>
+      <div class="drawer-pane" data-tab="metrics">
+        <div id="detail-metrics"></div>
+      </div>
+    </div>
+  </aside>
+</div>
 
 <div id="toast" class="toast"></div>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=6.3.1"></script>
 </body>
 </html>

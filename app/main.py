@@ -13,6 +13,8 @@ Endpoints:
     POST /api/tts/preview           voice sample for the builder
     POST /api/call                  place an outbound call with an agent
     GET  /api/calls[/{id}]          call history and detail
+    GET  /api/agents/{id}/calls     one agent's own call log
+    GET  /api/calls/{id}/audio      recorded turns, plus the stitched full.wav
     GET  /api/calls/{id}/events     live SSE feed of an in-progress call
     POST /api/twilio/voice|status   Twilio webhooks
     WS   /api/twilio/media-stream   bidirectional audio
@@ -21,8 +23,10 @@ Endpoints:
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
+import wave
 from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
@@ -38,7 +42,12 @@ from fastapi.staticfiles import StaticFiles
 from twilio.rest import Client as TwilioClient
 
 from app import db, registry, verify
-from app.audio import mulaw_to_pcm, pcm_to_wav_bytes
+from app.audio import (
+    mulaw_to_pcm,
+    pcm_to_wav_bytes,
+    resample_pcm,
+    wav_bytes_to_pcm,
+)
 from app.call_handler import CallSession
 from app.config import get_settings
 from app.crypto import mask
@@ -383,8 +392,13 @@ async def initiate_call(req: CallRequest):
 
 
 @app.get("/api/calls")
-async def get_calls(limit: int = 50):
-    return {"calls": db.list_calls(limit)}
+async def get_calls(limit: int = 50, agent_id: str | None = None):
+    return {"calls": db.list_calls(limit, agent_id)}
+
+
+@app.get("/api/agents/{agent_id}/calls")
+async def get_agent_calls(agent_id: str, limit: int = 50):
+    return {"calls": db.list_calls(limit, agent_id)}
 
 
 @app.get("/api/calls/{call_id}")
@@ -393,6 +407,111 @@ async def get_call(call_id: str):
     if call is None:
         return JSONResponse(status_code=404, content={"error": "Call not found"})
     return {"call": call, "turns": db.list_turns(call_id)}
+
+
+# ---------------------------------------------------------------------------
+# Call audio
+#
+# Every turn is already written to the call's log folder as a WAV by
+# CallLogger, so playback needs no new capture path — it only needs those files
+# named, ordered and (for the whole conversation) stitched into one stream.
+# ---------------------------------------------------------------------------
+TURN_CLIP_RE = re.compile(r"^turn_(\d{3})_(user|agent)\.wav$")
+PLAYBACK_RATE = 16000
+GAP_SECONDS = 0.25
+
+
+def _audio_dir(call: dict) -> Path | None:
+    log_dir = call.get("log_dir")
+    if not log_dir:
+        return None
+    directory = Path(log_dir) / "audio"
+    return directory if directory.is_dir() else None
+
+
+def _clips(call: dict) -> list[dict]:
+    """Turn WAVs in the order they were spoken — the caller before the reply."""
+    directory = _audio_dir(call)
+    if directory is None:
+        return []
+    found = []
+    for path in directory.iterdir():
+        match = TURN_CLIP_RE.match(path.name)
+        if match:
+            role = match.group(2)
+            found.append({
+                "turn": int(match.group(1)),
+                "role": role,
+                "name": path.name,
+                # Within a turn the caller speaks first, so `user` sorts ahead.
+                "_order": (int(match.group(1)), 0 if role == "user" else 1),
+            })
+    found.sort(key=lambda c: c["_order"])
+    for clip in found:
+        clip.pop("_order")
+    return found
+
+
+@app.get("/api/calls/{call_id}/audio")
+async def get_call_audio(call_id: str):
+    call = db.get_call(call_id)
+    if call is None:
+        return JSONResponse(status_code=404, content={"error": "Call not found"})
+    clips = _clips(call)
+    for clip in clips:
+        clip["url"] = f"/api/calls/{call_id}/audio/clip?name={clip['name']}"
+    return {
+        "available": bool(clips),
+        "clips": clips,
+        "full_url": f"/api/calls/{call_id}/audio/full.wav" if clips else None,
+    }
+
+
+@app.get("/api/calls/{call_id}/audio/full.wav")
+async def get_call_audio_full(call_id: str):
+    call = db.get_call(call_id)
+    if call is None:
+        return JSONResponse(status_code=404, content={"error": "Call not found"})
+    directory = _audio_dir(call)
+    clips = _clips(call)
+    if directory is None or not clips:
+        return JSONResponse(status_code=404, content={"error": "No recording for this call"})
+
+    gap = b"\x00" * (int(PLAYBACK_RATE * GAP_SECONDS) * 2)
+    merged = bytearray()
+    for clip in clips:
+        try:
+            pcm, rate = wav_bytes_to_pcm((directory / clip["name"]).read_bytes())
+        except (OSError, wave.Error):
+            logger.warning("Skipping unreadable clip %s", clip["name"])
+            continue
+        if merged:
+            merged.extend(gap)
+        merged.extend(resample_pcm(pcm, rate, PLAYBACK_RATE))
+
+    if not merged:
+        return JSONResponse(status_code=404, content={"error": "No recording for this call"})
+    return Response(
+        content=pcm_to_wav_bytes(bytes(merged), PLAYBACK_RATE),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f'inline; filename="{call_id}.wav"'},
+    )
+
+
+@app.get("/api/calls/{call_id}/audio/clip")
+async def get_call_audio_clip(call_id: str, name: str):
+    call = db.get_call(call_id)
+    if call is None:
+        return JSONResponse(status_code=404, content={"error": "Call not found"})
+    directory = _audio_dir(call)
+    # The name is matched against the turn pattern rather than sanitized, so no
+    # traversal or arbitrary filename can reach the filesystem here.
+    if directory is None or not TURN_CLIP_RE.match(name):
+        return JSONResponse(status_code=404, content={"error": "Clip not found"})
+    path = directory / name
+    if not path.is_file():
+        return JSONResponse(status_code=404, content={"error": "Clip not found"})
+    return FileResponse(path, media_type="audio/wav")
 
 
 @app.get("/api/calls/{call_id}/events")
@@ -601,7 +720,12 @@ async def twilio_media_stream(websocket: WebSocket):
 # ---------------------------------------------------------------------------
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # The shell carries the ?v= stamps for the CSS/JS, so it must never be the
+    # stale copy a browser held on to.
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

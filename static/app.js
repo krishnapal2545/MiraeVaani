@@ -27,19 +27,76 @@ function toast(message, isError = false) {
   setTimeout(() => (el.className = "toast"), 3200);
 }
 
+/* The builder and the call screen belong to one agent, so the sidebar swaps
+   from the product nav to that agent's own sections while they are open. */
+const AGENT_VIEWS = new Set(["builder", "call"]);
+const CRUMB_FOR_VIEW = { agents: "Agents", credentials: "Settings" };
+
 function show(view) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
   $("view-" + view).classList.add("active");
-  document.querySelectorAll(".tab").forEach((t) =>
-    t.classList.toggle("active", t.dataset.view === view)
+
+  const inAgent = AGENT_VIEWS.has(view);
+  $("root-nav").classList.toggle("hidden", inAgent);
+  $("agent-nav").classList.toggle("hidden", !inAgent);
+
+  // Settings lives in the pinned sidebar footer, outside #root-nav, so the
+  // lit state is driven off every nav item that names a view.
+  document.querySelectorAll(".nav-item[data-view]").forEach((t) =>
+    t.classList.toggle("active", !inAgent && t.dataset.view === view)
   );
-  if (view === "calls") loadCalls();
+  if (!inAgent) $("crumb").textContent = CRUMB_FOR_VIEW[view] || "";
+
   if (view === "credentials") loadCredentials();
 }
 
-document.querySelectorAll(".tab").forEach((tab) =>
+document.querySelectorAll(".nav-item[data-view]").forEach((tab) =>
   tab.addEventListener("click", () => show(tab.dataset.view))
 );
+
+/* Sections within one agent's workspace (Prompt / Speech / Turn taking /
+   Conversations) — the same screen, so they switch panes rather than views. */
+function showPane(pane) {
+  if (!$("view-builder").classList.contains("active")) show("builder");
+  document.querySelectorAll(".pane-view").forEach((p) =>
+    p.classList.toggle("active", p.dataset.pane === pane)
+  );
+  document.querySelectorAll("#agent-nav .nav-item").forEach((t) =>
+    t.classList.toggle("active", t.dataset.pane === pane)
+  );
+  $("crumb").textContent =
+    `Agents / ${$("agent-nav-name").textContent} / ${paneLabel(pane)}`;
+  if (pane === "conversations") loadAgentCalls();
+}
+
+function paneLabel(pane) {
+  const item = document.querySelector(`#agent-nav .nav-item[data-pane="${pane}"]`);
+  return item ? item.querySelector("span").textContent : "";
+}
+
+document.querySelectorAll("#agent-nav .nav-item").forEach((tab) =>
+  tab.addEventListener("click", () => showPane(tab.dataset.pane))
+);
+
+$("back-to-agents").onclick = () => { show("agents"); loadAgents(); };
+
+/* ------------------------------------------------------------------ */
+/* theme                                                               */
+/* ------------------------------------------------------------------ */
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = theme;
+  // The switch shows the theme that is on, not the one it would move to.
+  $("theme-icon").textContent = dark ? "☾" : "☀";
+  $("theme-label").textContent = dark ? "Dark" : "Light";
+  $("theme-toggle").setAttribute("aria-checked", String(dark));
+  try { localStorage.setItem("mv-theme", theme); } catch (e) { /* private mode */ }
+}
+
+$("theme-toggle").onclick = () =>
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
 
 /* ------------------------------------------------------------------ */
 /* catalog + builder wiring                                            */
@@ -132,17 +189,41 @@ $("f-starter").addEventListener("change", (e) => {
 /* ------------------------------------------------------------------ */
 /* agents                                                              */
 /* ------------------------------------------------------------------ */
+let AGENTS = [];
+
 async function loadAgents() {
-  const { agents } = await api("/api/agents");
+  AGENTS = (await api("/api/agents")).agents;
+  renderAgents();
+}
+
+function renderAgents() {
+  const query = ($("agent-search").value || "").trim().toLowerCase();
+  const agents = query
+    ? AGENTS.filter((a) => (a.name || "").toLowerCase().includes(query))
+    : AGENTS;
+
   const list = $("agent-list");
   list.innerHTML = "";
-  $("agents-empty").classList.toggle("hidden", agents.length > 0);
+  const empty = $("agents-empty");
+  empty.classList.toggle("hidden", agents.length > 0);
+  if (!agents.length) {
+    empty.textContent = AGENTS.length
+      ? `No agent matches "${$("agent-search").value.trim()}".`
+      : "No agents yet. Create one to get started — you'll pick the speech, " +
+        "language and voice models, then write what the agent should say.";
+  }
 
   agents.forEach((a) => {
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
-      <h4></h4>
+      <div class="card-head">
+        <img class="logo-mark" src="/static/images/vaani_logo.jpg" alt="">
+        <div>
+          <h4></h4>
+          <p class="meta-line">${a.llm_provider} · ${a.tts_voice}</p>
+        </div>
+      </div>
       <div class="stack">
         <span class="chip">${a.stt_provider}</span>
         <span class="chip">${a.llm_model}</span>
@@ -150,13 +231,17 @@ async function loadAgents() {
         <span class="chip">${a.language_mode === "auto" ? "auto-detect" : a.language}</span>
       </div>
       <div class="actions">
-        <button class="btn primary small" data-act="call">Call</button>
-        <button class="btn ghost small" data-act="edit">Edit</button>
+        <button class="btn primary small" data-act="open">Open</button>
+        <button class="btn ghost small" data-act="call">Call</button>
+        <button class="btn ghost small" data-act="logs">Logs</button>
         <button class="btn ghost small" data-act="delete">Delete</button>
       </div>`;
     card.querySelector("h4").textContent = a.name;
+    card.querySelector("h4").onclick = () => openBuilder(a.id);
     card.querySelector('[data-act="call"]').onclick = () => openCall(a.id);
-    card.querySelector('[data-act="edit"]').onclick = () => openBuilder(a.id);
+    card.querySelector('[data-act="open"]').onclick = () => openBuilder(a.id);
+    card.querySelector('[data-act="logs"]').onclick = () =>
+      openBuilder(a.id, "conversations");
     card.querySelector('[data-act="delete"]').onclick = async () => {
       if (!confirm(`Delete "${a.name}"?`)) return;
       await api(`/api/agents/${a.id}`, { method: "DELETE" });
@@ -166,6 +251,8 @@ async function loadAgents() {
     list.appendChild(card);
   });
 }
+
+$("agent-search").addEventListener("input", renderAgents);
 
 function formToAgent() {
   return {
@@ -271,14 +358,21 @@ const DEFAULT_AGENT = {
   redirect_number: "",
 };
 
-async function openBuilder(agentId) {
+async function openBuilder(agentId, pane = "prompt") {
   EDITING = agentId || null;
   if (agentId) {
     const agent = await api(`/api/agents/${agentId}`);
-    $("builder-title").textContent = `Edit — ${agent.name}`;
+    $("builder-title").textContent = agent.name;
+    $("builder-subtitle").textContent =
+      `${agent.llm_provider} · ${agent.tts_provider} ${agent.tts_voice} · ` +
+      (agent.language_mode === "auto" ? "auto-detect" : agent.language);
+    $("agent-nav-name").textContent = agent.name;
     agentToForm(agent);
   } else {
     $("builder-title").textContent = "New agent";
+    $("builder-subtitle").textContent =
+      "Configure how this agent speaks and what it says, then save it.";
+    $("agent-nav-name").textContent = "New agent";
     agentToForm({
       ...DEFAULT_AGENT,
       system_prompt: CATALOG.starters[0].body,
@@ -286,26 +380,53 @@ async function openBuilder(agentId) {
       greeting_text: CATALOG.starters[0].greeting || "",
     });
   }
+  // An unsaved agent has no call log and cannot be dialled yet.
+  $("builder-call").classList.toggle("hidden", !agentId);
+  document.querySelector('#agent-nav .nav-item[data-pane="conversations"]')
+    .classList.toggle("hidden", !agentId);
+
   show("builder");
+  showPane(agentId ? pane : "prompt");
 }
 
 $("new-agent").onclick = () => openBuilder(null);
 $("builder-cancel").onclick = () => { show("agents"); loadAgents(); };
+$("builder-call").onclick = () => { if (EDITING) openCall(EDITING); };
 $("builder-save").onclick = async () => {
   const payload = formToAgent();
   try {
     if (EDITING) {
       await api(`/api/agents/${EDITING}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Agent saved");
+      await loadAgents();
+      openBuilder(EDITING, currentPane());
     } else {
-      await api("/api/agents", { method: "POST", body: JSON.stringify(payload) });
+      const created = await api("/api/agents",
+        { method: "POST", body: JSON.stringify(payload) });
+      toast("Agent created");
+      await loadAgents();
+      openBuilder(created.id, "prompt");
     }
-    toast("Agent saved");
-    show("agents");
-    loadAgents();
   } catch (err) {
     toast(err.message, true);
   }
 };
+
+function currentPane() {
+  const active = document.querySelector(".pane-view.active");
+  return active ? active.dataset.pane : "prompt";
+}
+
+/* ------------------------------------------------------------------ */
+/* one agent's call log                                                */
+/* ------------------------------------------------------------------ */
+async function loadAgentCalls() {
+  if (!EDITING) return;
+  const { calls } = await api(`/api/agents/${EDITING}/calls`);
+  renderCallRows(calls, $("agent-calls-body"), $("agent-calls-empty"));
+}
+
+$("refresh-agent-calls").onclick = loadAgentCalls;
 
 $("preview-voice").onclick = async () => {
   const status = $("preview-status");
@@ -353,12 +474,20 @@ async function openCall(agentId) {
     box.appendChild(label);
   });
 
+  // The call screen lives inside the agent, so the sidebar keeps its name.
+  EDITING = CALL_AGENT.id;
+  $("agent-nav-name").textContent = CALL_AGENT.name;
   show("call");
+  document.querySelectorAll("#agent-nav .nav-item")
+    .forEach((t) => t.classList.remove("active"));
+  $("crumb").textContent = `Agents / ${CALL_AGENT.name} / Test call`;
 }
 
 $("call-back").onclick = () => {
   if (EVENT_SOURCE) { EVENT_SOURCE.close(); EVENT_SOURCE = null; }
-  show("agents");
+  // Back into the agent this call belongs to, on its own call log.
+  if (CALL_AGENT) openBuilder(CALL_AGENT.id, "conversations");
+  else show("agents");
 };
 
 $("do-call").onclick = async () => {
@@ -525,39 +654,131 @@ function watchCall(callId) {
 /* handled above: it simply stays in `pending` until the first real turn.  */
 
 /* ------------------------------------------------------------------ */
-/* call history                                                        */
+/* call log rows                                                       */
 /* ------------------------------------------------------------------ */
-async function loadCalls() {
-  const { calls } = await api("/api/calls");
-  const body = $("calls-body");
+function fmtWhen(iso) {
+  if (!iso) return "—";
+  const [date, time] = iso.replace("T", " ").split(" ");
+  return `<b>${date}</b><br><span class="note inline">${(time || "").slice(0, 5)}</span>`;
+}
+
+function fmtDuration(seconds) {
+  if (!seconds && seconds !== 0) return "—";
+  const total = Math.round(seconds);
+  return total < 60 ? `${total} sec`
+                    : `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, "0")}s`;
+}
+
+/* Calls are only ever listed inside the agent that placed them, so the rows
+   carry no agent column — the workspace around them already names it. */
+function renderCallRows(calls, body, emptyEl) {
   body.innerHTML = "";
+  if (emptyEl) emptyEl.classList.toggle("hidden", calls.length > 0);
+
   calls.forEach((c) => {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${(c.created_at || "").replace("T", " ")}</td>
-      <td>${c.agent_name || "—"}</td>
+      <td>${fmtWhen(c.created_at)}</td>
       <td>${c.to_number}</td>
       <td><span class="pill ${c.status}">${(c.status || "").replace(/_/g, " ")}</span></td>
       <td>${c.turns || 0}</td>
+      <td>${fmtDuration(c.duration_s)}</td>
       <td>${c.outcome || "—"}</td>
-      <td><button class="btn ghost small">View</button></td>`;
-    tr.querySelector("button").onclick = () => showCallDetail(c.id);
+      <td class="row-open"><button class="btn ghost small">Details</button></td>`;
+    tr.querySelector("button").onclick = () => openCallDrawer(c, tr);
     body.appendChild(tr);
   });
 }
 
-async function showCallDetail(callId) {
-  const { turns } = await api(`/api/calls/${callId}`);
+/* ------------------------------------------------------------------ */
+/* call drawer — transcript, recording and per-turn latency            */
+/* ------------------------------------------------------------------ */
+function closeDrawer() {
+  $("call-drawer").classList.add("hidden");
+  // Stop whatever is playing; the element is replaced on the next open anyway.
+  $("drawer-audio").innerHTML = "";
+  document.querySelectorAll("tr.selected").forEach((tr) => tr.classList.remove("selected"));
+}
+
+$("drawer-close").onclick = closeDrawer;
+$("drawer-scrim").onclick = closeDrawer;
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("call-drawer").classList.contains("hidden")) closeDrawer();
+});
+
+document.querySelectorAll(".drawer-tab").forEach((tab) =>
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".drawer-tab").forEach((t) =>
+      t.classList.toggle("active", t === tab));
+    document.querySelectorAll(".drawer-pane").forEach((p) =>
+      p.classList.toggle("active", p.dataset.tab === tab.dataset.tab));
+  })
+);
+
+async function openCallDrawer(summary, row) {
+  document.querySelectorAll("tr.selected").forEach((tr) => tr.classList.remove("selected"));
+  if (row) row.classList.add("selected");
+
+  $("call-drawer").classList.remove("hidden");
+  $("drawer-sub").textContent =
+    `${summary.agent_name || "Agent"} → ${summary.to_number} · ` +
+    (summary.created_at || "").replace("T", " ");
+  $("drawer-audio").innerHTML = '<p class="empty-audio">Loading recording…</p>';
+  $("detail-transcript").innerHTML = '<p class="empty">Loading…</p>';
+
+  const [{ call, turns }, audio] = await Promise.all([
+    api(`/api/calls/${summary.id}`),
+    api(`/api/calls/${summary.id}/audio`).catch(() => ({ available: false, clips: [] })),
+  ]);
+
+  renderAudioBlock(audio);
+  renderDrawerTranscript(turns, audio);
+  renderOverview(call);
+  renderMetrics(turns);
+}
+
+function renderAudioBlock(audio) {
+  const box = $("drawer-audio");
+  if (!audio.available) {
+    box.innerHTML =
+      '<div class="empty-audio"><strong>Recording unavailable</strong>' +
+      "The audio for this call was not kept on disk.</div>";
+    return;
+  }
+  box.innerHTML = "";
+  const player = document.createElement("audio");
+  player.controls = true;
+  player.preload = "none";
+  player.src = audio.full_url;
+  const caption = document.createElement("p");
+  caption.className = "note";
+  caption.textContent =
+    `Full conversation · ${audio.clips.length} clips, caller and agent in order.`;
+  box.append(player, caption);
+}
+
+function renderDrawerTranscript(turns, audio) {
   const box = $("detail-transcript");
   box.innerHTML = turns.length ? "" : '<p class="empty">No turns recorded.</p>';
+
+  // One clip per (turn, role), so a bubble can play back exactly its own audio.
+  const clipFor = {};
+  (audio.clips || []).forEach((c) => { clipFor[`${c.turn}:${c.role}`] = c.url; });
 
   turns.forEach((t) => {
     const el = document.createElement("div");
     el.className = "bubble " + (t.role === "user" ? "user" : "agent");
+
     const who = document.createElement("div");
     who.className = "who";
-    who.textContent = (t.role === "user" ? "Caller" : "Vaani") +
-                      (t.language ? ` · ${t.language}` : "");
+    const label = document.createElement("span");
+    label.textContent = (t.role === "user" ? "Caller" : "Vaani") +
+                        (t.language ? ` · ${t.language}` : "");
+    who.appendChild(label);
+
+    const clip = clipFor[`${t.turn}:${t.role === "user" ? "user" : "agent"}`];
+    if (clip) who.appendChild(playButton(clip));
+
     const bodyEl = document.createElement("div");
     bodyEl.className = "body";
     bodyEl.textContent = t.text;
@@ -576,12 +797,106 @@ async function showCallDetail(callId) {
     }
     box.appendChild(el);
   });
-
-  $("call-detail").classList.remove("hidden");
+  box.scrollTop = 0;
 }
 
-$("close-detail").onclick = () => $("call-detail").classList.add("hidden");
-$("refresh-calls").onclick = loadCalls;
+let CLIP_PLAYER = null;
+
+function playButton(url) {
+  const button = document.createElement("button");
+  button.className = "play-turn";
+  button.type = "button";
+  button.textContent = "▶";
+  button.title = "Play this turn";
+  button.onclick = () => {
+    // Only ever one clip at a time, so turns don't talk over each other.
+    if (CLIP_PLAYER) {
+      CLIP_PLAYER.pause();
+      document.querySelectorAll(".play-turn.playing").forEach((b) => {
+        b.classList.remove("playing");
+        b.textContent = "▶";
+      });
+      if (CLIP_PLAYER.dataset.url === url) { CLIP_PLAYER = null; return; }
+    }
+    CLIP_PLAYER = new Audio(url);
+    CLIP_PLAYER.dataset.url = url;
+    button.classList.add("playing");
+    button.textContent = "■";
+    CLIP_PLAYER.onended = () => {
+      button.classList.remove("playing");
+      button.textContent = "▶";
+      CLIP_PLAYER = null;
+    };
+    CLIP_PLAYER.play().catch(() => toast("Could not play this clip", true));
+  };
+  return button;
+}
+
+function renderOverview(call) {
+  const variables = (() => {
+    try { return JSON.parse(call.variables || "{}"); } catch (e) { return {}; }
+  })();
+  const rows = [
+    ["Agent", call.agent_name || "—"],
+    ["To", call.to_number],
+    ["Direction", call.direction],
+    ["Status", (call.status || "").replace(/_/g, " ")],
+    ["Started", (call.started_at || "—").replace("T", " ")],
+    ["Ended", (call.ended_at || "—").replace("T", " ")],
+    ["Duration", fmtDuration(call.duration_s)],
+    ["Turns", call.turns || 0],
+    ["Outcome", call.outcome || "—"],
+    ["Summary", call.outcome_summary || "—"],
+    ["Call SID", call.call_sid || "—"],
+  ];
+  Object.entries(variables).forEach(([k, v]) => rows.push([`$${k}`, String(v)]));
+
+  const list = $("detail-overview");
+  list.innerHTML = "";
+  rows.forEach(([term, value]) => {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    list.append(dt, dd);
+  });
+}
+
+function renderMetrics(turns) {
+  const measured = turns.filter((t) => t.total_ms || t.stt_ms || t.llm_ms);
+  const box = $("detail-metrics");
+  if (!measured.length) {
+    box.innerHTML = '<p class="empty">No latency was recorded for this call.</p>';
+    return;
+  }
+  const avg = (key) => {
+    const values = measured.map((t) => t[key]).filter(Boolean);
+    return values.length
+      ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) + " ms"
+      : "—";
+  };
+  box.innerHTML = `
+    <dl class="facts">
+      <dt>Average STT</dt><dd>${avg("stt_ms")}</dd>
+      <dt>Average LLM</dt><dd>${avg("llm_ms")}</dd>
+      <dt>Average TTS first byte</dt><dd>${avg("tts_ttfb_ms")}</dd>
+      <dt>Average turn total</dt><dd>${avg("total_ms")}</dd>
+    </dl>
+    <div class="table-wrap" style="margin-top:16px">
+      <table class="table">
+        <thead><tr><th>Turn</th><th class="right">STT</th><th class="right">LLM</th>
+          <th class="right">TTS</th><th class="right">Total</th><th>Filler</th></tr></thead>
+        <tbody>${measured.map((t) => `
+          <tr><td>${t.turn}</td>
+            <td class="right">${t.stt_ms || "—"}</td>
+            <td class="right">${t.llm_ms || "—"}</td>
+            <td class="right">${t.tts_ttfb_ms || "—"}</td>
+            <td class="right">${t.total_ms || "—"}</td>
+            <td>${t.filler_played || "—"}</td></tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
 
 /* ------------------------------------------------------------------ */
 /* credentials                                                         */

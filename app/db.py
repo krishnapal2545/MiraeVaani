@@ -286,13 +286,19 @@ def find_call_by_sid(call_sid: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def list_calls(limit: int = 50) -> list[dict[str, Any]]:
-    rows = connect().execute(
+def list_calls(limit: int = 50, agent_id: str | None = None) -> list[dict[str, Any]]:
+    """Recent calls, newest first — for one agent's own log when `agent_id` is set."""
+    sql = (
         "SELECT c.*, a.name AS agent_name FROM calls c "
         "LEFT JOIN agents a ON a.id = c.agent_id "
-        "ORDER BY c.created_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+    )
+    params: list[Any] = []
+    if agent_id:
+        sql += "WHERE c.agent_id = ? "
+        params.append(agent_id)
+    sql += "ORDER BY c.created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = connect().execute(sql, tuple(params)).fetchall()
     return [dict(r) for r in rows]
 
 
