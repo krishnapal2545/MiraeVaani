@@ -196,6 +196,14 @@ async function loadAgents() {
   renderAgents();
 }
 
+/* Button glyphs, drawn on the same 24-unit grid as the sidebar icons and left
+   unfilled so they take the colour of whatever button they sit in. */
+const ICONS = {
+  call: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h3l1.6 4L7.5 9.6a12 12 0 0 0 6.9 6.9L16 14.4l4 1.6v3a2 2 0 0 1-2.2 2A16 16 0 0 1 3 6.2 2 2 0 0 1 5 4Z"/></svg>',
+  logs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h2l1.2 3-1.6 1.2a9 9 0 0 0 5.2 5.2L11 12.8l3 1.2v2.2a1.6 1.6 0 0 1-1.7 1.6A13 13 0 0 1 1.4 6.7 1.6 1.6 0 0 1 3 5Z"/><path d="M15 6h7M15 10h7M15 14h4"/></svg>',
+  delete: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9.5 7V5h5v2M6 7l1 12.2A1.8 1.8 0 0 0 8.8 21h6.4A1.8 1.8 0 0 0 17 19.2L18 7"/><path d="M10.5 11v6M13.5 11v6"/></svg>',
+};
+
 function renderAgents() {
   const query = ($("agent-search").value || "").trim().toLowerCase();
   const agents = query
@@ -215,7 +223,9 @@ function renderAgents() {
 
   agents.forEach((a) => {
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "card clickable";
+    card.setAttribute("role", "button");
+    card.tabIndex = 0;
     card.innerHTML = `
       <div class="card-head">
         <img class="logo-mark" src="/static/images/vaani_logo.jpg" alt="">
@@ -231,22 +241,34 @@ function renderAgents() {
         <span class="chip">${a.language_mode === "auto" ? "auto-detect" : a.language}</span>
       </div>
       <div class="actions">
-        <button class="btn primary small" data-act="open">Open</button>
-        <button class="btn ghost small" data-act="call">Call</button>
-        <button class="btn ghost small" data-act="logs">Logs</button>
-        <button class="btn ghost small" data-act="delete">Delete</button>
+        <button class="btn ghost small" data-act="call">${ICONS.call}Call</button>
+        <button class="btn ghost small" data-act="logs">${ICONS.logs}Logs</button>
+        <button class="btn ghost small danger" data-act="delete">${ICONS.delete}Delete</button>
       </div>`;
     card.querySelector("h4").textContent = a.name;
-    card.querySelector("h4").onclick = () => openBuilder(a.id);
-    card.querySelector('[data-act="call"]').onclick = () => openCall(a.id);
-    card.querySelector('[data-act="open"]').onclick = () => openBuilder(a.id);
-    card.querySelector('[data-act="logs"]').onclick = () =>
-      openBuilder(a.id, "conversations");
-    card.querySelector('[data-act="delete"]').onclick = async () => {
+
+    // The card itself opens the agent, so each action has to stop the click
+    // from reaching it — otherwise Call would also navigate to the workspace.
+    const action = (act, handler) => {
+      card.querySelector(`[data-act="${act}"]`).onclick = (event) => {
+        event.stopPropagation();
+        handler();
+      };
+    };
+    action("call", () => openCall(a.id));
+    action("logs", () => openBuilder(a.id, "conversations"));
+    action("delete", async () => {
       if (!confirm(`Delete "${a.name}"?`)) return;
       await api(`/api/agents/${a.id}`, { method: "DELETE" });
       toast("Agent deleted");
       loadAgents();
+    });
+
+    card.onclick = () => openBuilder(a.id);
+    card.onkeydown = (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();     // Space would otherwise scroll the page
+      openBuilder(a.id);
     };
     list.appendChild(card);
   });
@@ -909,10 +931,27 @@ function showCredResult(key, result) {
   const prefix = { ok: "✓", invalid: "✕", unknown: "!" }[result.status] || "";
   el.textContent = `${prefix} ${result.message}`;
   el.className = `note cred-status ${STATUS_CLASS[result.status] || ""}`;
+
+  // Keep the row's pill honest about what the provider just said.
+  const pill = key === "twilio"
+    ? $("tw-pill") : document.querySelector(`[data-pill-for="${key}"]`);
+  if (!pill) return;
+  if (result.status === "ok") {
+    pill.textContent = key === "twilio" ? "configured" : "verified";
+    pill.className = "pill connected";
+  } else if (result.status === "invalid") {
+    pill.textContent = "rejected";
+    pill.className = "pill rejected";
+  }
 }
 
 function showCredResults(results) {
   Object.entries(results || {}).forEach(([key, result]) => showCredResult(key, result));
+}
+
+function setPill(el, configured, savedLabel = "connected") {
+  el.textContent = configured ? savedLabel : "not set";
+  el.className = "pill " + (configured ? "connected" : "unset");
 }
 
 async function loadCredentials() {
@@ -921,25 +960,36 @@ async function loadCredentials() {
   box.innerHTML = "";
 
   data.providers.forEach((p) => {
-    const label = document.createElement("label");
-    label.innerHTML = `${p.label} <span class="note inline">— ${p.hint}</span>`;
-    const input = document.createElement("input");
-    input.type = "password";
-    input.dataset.cred = p.key;
-    input.placeholder = p.configured ? `saved (${p.masked})` : "not set";
-    label.appendChild(input);
-    box.appendChild(label);
-
-    const status = document.createElement("p");
-    status.className = "note cred-status";
-    status.dataset.statusFor = p.key;
-    box.appendChild(status);
+    const row = document.createElement("div");
+    row.className = "cred-row";
+    row.innerHTML = `
+      <div class="cred-head">
+        <div class="cred-name"></div>
+        <span class="pill" data-pill-for="${p.key}"></span>
+      </div>
+      <p class="cred-hint"></p>
+      <input type="password" data-cred="${p.key}">
+      <p class="note cred-status" data-status-for="${p.key}"></p>`;
+    row.querySelector(".cred-name").textContent = p.label;
+    row.querySelector(".cred-hint").textContent = p.hint;
+    const input = row.querySelector("input");
+    input.setAttribute("aria-label", `${p.label} API key`);
+    input.placeholder = p.configured ? `saved · ${p.masked}` : "paste API key";
+    setPill(row.querySelector(".pill"), p.configured, "saved");
+    box.appendChild(row);
   });
+
+  const saved = data.providers.filter((p) => p.configured).length;
+  const summary = $("cred-summary");
+  summary.textContent = saved
+    ? `${saved} of ${data.providers.length} saved` : "none saved";
+  summary.className = "pill " + (saved ? "connected" : "unset");
 
   $("tw-sid").value = data.twilio.account_sid || "";
   $("tw-from").value = data.twilio.from_number || "";
   $("tw-token").placeholder = data.twilio.configured
-    ? `saved (${data.twilio.auth_token_masked})` : "not set";
+    ? `saved (${data.twilio.auth_token_masked}) — leave blank to keep` : "not set";
+  setPill($("tw-pill"), data.twilio.configured, "configured");
   $("tw-status").textContent = data.twilio.configured
     ? "Twilio is configured." : "Twilio is not configured — calls will be refused.";
   $("tw-status").className = "note cred-status";

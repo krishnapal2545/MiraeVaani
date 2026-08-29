@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MiraeVaani — Voice Agents</title>
 <link rel="icon" href="/static/images/vaani_logo.jpg">
-<link rel="stylesheet" href="/static/style.css?v=6.3.1">
+<link rel="stylesheet" href="/static/style.css?v=6.4.1">
 <script>
   /* Applied before first paint so a dark-theme reload never flashes white. */
   try {
@@ -370,23 +370,40 @@
         <button class="btn primary" id="save-credentials">Save</button>
       </div>
     </div>
-    <p class="note wide-note">
-      Keys are encrypted before they're written to disk and are never sent back to
-      the browser in full. Leave a field blank to keep the saved value. Every key is
-      checked against its provider on save — one the provider rejects is not stored.
-    </p>
-    <div class="panel">
-      <h3>AI providers</h3>
-      <div id="credential-fields"></div>
+    <div class="callout">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>
+      <span>Keys are encrypted before they're written to disk and are never sent back
+        to the browser in full. Leave a field blank to keep the saved value. Every key
+        is checked against its provider on save — one the provider rejects is not stored.</span>
     </div>
+
     <div class="panel">
-      <h3>Twilio</h3>
-      <div class="two">
-        <label>Account SID <input id="tw-sid" type="text" placeholder="ACxxxxxxxx"></label>
-        <label>Auth token <input id="tw-token" type="password" placeholder="leave blank to keep"></label>
+      <div class="section-head">
+        <div>
+          <h3>AI providers</h3>
+          <p class="note">Speech, language and voice keys this workspace can use.</p>
+        </div>
+        <span class="pill unset" id="cred-summary">none saved</span>
       </div>
-      <label>From number <input id="tw-from" type="tel" placeholder="+1XXXXXXXXXX"></label>
-      <p class="note cred-status" id="tw-status" data-status-for="twilio"></p>
+      <div id="credential-fields" class="cred-list"></div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head">
+        <div>
+          <h3>Twilio</h3>
+          <p class="note">The phone line every outbound call is placed from.</p>
+        </div>
+        <span class="pill unset" id="tw-pill">not set</span>
+      </div>
+      <div class="cred-row">
+        <div class="three">
+          <label>Account SID <input id="tw-sid" type="text" placeholder="ACxxxxxxxx"></label>
+          <label>Auth token <input id="tw-token" type="password" placeholder="leave blank to keep"></label>
+          <label>From number <input id="tw-from" type="tel" placeholder="+1XXXXXXXXXX"></label>
+        </div>
+        <p class="note cred-status" id="tw-status" data-status-for="twilio"></p>
+      </div>
     </div>
   </section>
 
@@ -432,6 +449,6 @@
 </div>
 
 <div id="toast" class="toast"></div>
-<script src="/static/app.js?v=6.3.1"></script>
+<script src="/static/app.js?v=6.4.1"></script>
 </body>
 </html>
