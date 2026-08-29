@@ -47,12 +47,21 @@ class GeminiLLM(LLMProvider):
                     )
                 )
             elif role == "assistant":
+                # A function response with no function call in front of it is
+                # not history Gemini can read — it arrives looking like an
+                # unprompted instruction. Emit the call parts even when the
+                # model produced no text alongside them, which is the usual case.
+                parts = []
                 if content:
-                    contents.append(
-                        types.Content(
-                            role="model", parts=[types.Part.from_text(text=content)]
+                    parts.append(types.Part.from_text(text=content))
+                for call in msg.get("tool_calls") or []:
+                    parts.append(
+                        types.Part.from_function_call(
+                            name=call["name"], args=call.get("arguments") or {}
                         )
                     )
+                if parts:
+                    contents.append(types.Content(role="model", parts=parts))
             else:
                 contents.append(
                     types.Content(
@@ -115,8 +124,14 @@ class GeminiLLM(LLMProvider):
 
         text_parts: list[str] = []
         calls: list[ToolCall] = []
+        truncated = False
 
         for candidate in response.candidates or []:
+            # Gemini reports the token limit as a finish reason on the
+            # candidate; it arrives as an enum, so compare on its name.
+            reason = getattr(candidate, "finish_reason", None)
+            if reason is not None and "MAX_TOKENS" in str(getattr(reason, "name", reason)):
+                truncated = True
             for part in (getattr(candidate.content, "parts", None) or []):
                 if getattr(part, "function_call", None):
                     fc = part.function_call
@@ -130,4 +145,6 @@ class GeminiLLM(LLMProvider):
                 elif getattr(part, "text", None):
                     text_parts.append(part.text)
 
-        return LLMReply(text="".join(text_parts).strip(), tool_calls=calls)
+        return LLMReply(
+            text="".join(text_parts).strip(), tool_calls=calls, truncated=truncated
+        )

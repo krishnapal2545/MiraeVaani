@@ -308,9 +308,39 @@ _NON_CHAT = (
     "transcribe", "omni", "deep-research", "antigravity", "veo", "imagen",
 )
 
+# Chat models that cannot do *this* job. `allam-2-7b` is a 7B Arabic/English
+# model: it has no real Devanagari, it ignores a long call-flow prompt and
+# reverts to generic assistant behaviour ("How may I assist you?") on an
+# outbound script, it degenerates into repeated fragments when pushed to write
+# Hindi, and Groq rejects tool calls for it — which silently costs the agent
+# `end_call` and `record_outcome` for the whole call.
+_WRONG_JOB = ("allam",)
+
+# The dropdown lands on whichever id sorts first, so plain alphabetical order
+# chose the account's worst model. Better models sort first now; anything
+# unrecognised keeps its alphabetical place after them rather than ahead.
+_PREFERRED = (
+    "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash",
+    "grok-4-fast", "grok-4", "grok-3",
+    "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+    "qwen", "llama", "gemma", "groq/compound-mini", "groq/compound",
+)
+
+
+def _rank(model_id: str) -> int:
+    lowered = model_id.lower()
+    for position, marker in enumerate(_PREFERRED):
+        if lowered.startswith(marker) or marker in lowered:
+            return position
+    return len(_PREFERRED)
+
 
 def _chat_only(ids: list[str]) -> list[str]:
-    return sorted(i for i in ids if not any(bad in i.lower() for bad in _NON_CHAT))
+    usable = [
+        i for i in ids
+        if not any(bad in i.lower() for bad in _NON_CHAT + _WRONG_JOB)
+    ]
+    return sorted(usable, key=lambda i: (_rank(i), i))
 
 
 async def list_llm_models(provider: str, secret: str) -> list[str] | None:

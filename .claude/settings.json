@@ -9,7 +9,11 @@
       "PowerShell(git -C \"d:\\\\Tech\\\\MiraeVaani\\\\MiraeVaani6.0\" status --short)",
       "PowerShell(.venv\\\\Scripts\\\\python.exe scripts\\\\test_session.py 2>&1)",
       "PowerShell(.venv\\\\Scripts\\\\python.exe \"C:\\\\Users\\\\krish\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Tech-MiraeVaani-MiraeVaani6-0\\\\8f9b951b-ed34-4999-b610-5f00b76dd065\\\\scratchpad\\\\test_fixes.py\" 2>&1)",
-      "PowerShell(.venv\\\\Scripts\\\\python.exe \"C:\\\\Users\\\\krish\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Tech-MiraeVaani-MiraeVaani6-0\\\\8f9b951b-ed34-4999-b610-5f00b76dd065\\\\scratchpad\\\\test_xai.py\" 2>&1)"
+      "PowerShell(.venv\\\\Scripts\\\\python.exe \"C:\\\\Users\\\\krish\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Tech-MiraeVaani-MiraeVaani6-0\\\\8f9b951b-ed34-4999-b610-5f00b76dd065\\\\scratchpad\\\\test_xai.py\" 2>&1)",
+      "Bash(python -c ' *)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(cp miraevaani.db __TRACKED_VAR__/mv_test.db)",
+      "Bash(cp miraevaani.db \"C:/Users/krish/AppData/Local/Temp/claude/d--Tech-MiraeVaani-MiraeVaani6-0/d3395748-f700-45a9-a769-c7137d11a3d4/scratchpad/mv_test.db\")"
     ]
   }
 }

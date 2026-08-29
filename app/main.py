@@ -46,7 +46,12 @@ from app.dialog import DialogEngine
 from app.events import broker
 from app.fillers import FillerBank, FillerController
 from app.models import AgentConfig, CallRequest
-from app.prompts import STARTER_PROMPTS, build_system_prompt, declared_variables
+from app.prompts import (
+    STARTER_PROMPTS,
+    build_system_prompt,
+    declared_variables,
+    render,
+)
 from app.registry import MissingCredential
 
 settings = get_settings()
@@ -258,7 +263,11 @@ async def get_agent(agent_id: str):
         return JSONResponse(status_code=404, content={"error": "Agent not found"})
     return {
         **agent.model_dump(),
-        "variables": declared_variables(agent.system_prompt),
+        # The greeting is rendered with the same values, so a placeholder used
+        # only there must still be asked for before dialling.
+        "variables": declared_variables(
+            f"{agent.system_prompt}\n{agent.greeting_text}"
+        ),
     }
 
 
@@ -548,6 +557,11 @@ async def twilio_media_stream(websocket: WebSocket):
         return
 
     system_prompt = build_system_prompt(agent.system_prompt, context.get("variables"))
+    # A static greeting is authored with the same $placeholders as the prompt, so
+    # it has to be rendered too — otherwise the caller is greeted by name as
+    # "$customer_name".
+    if agent.greeting_text:
+        agent.greeting_text = render(agent.greeting_text, context.get("variables"))
     dialog = DialogEngine(
         llm,
         system_prompt,

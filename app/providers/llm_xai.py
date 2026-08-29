@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from app.providers.base import LLMProvider, LLMReply, ToolCall
+from app.providers.base import LLMProvider, LLMReply, ToolCall, to_openai_messages
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,10 @@ class XaiLLM(LLMProvider):
     ) -> LLMReply:
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": [{"role": "system", "content": system}, *messages],
+            "messages": [
+                {"role": "system", "content": system},
+                *to_openai_messages(messages),
+            ],
             "temperature": temperature,
             "max_tokens": max_output_tokens,
         }
@@ -87,7 +90,11 @@ class XaiLLM(LLMProvider):
                 )
             )
 
-        return LLMReply(text=(message.get("content") or "").strip(), tool_calls=calls)
+        return LLMReply(
+            text=(message.get("content") or "").strip(),
+            tool_calls=calls,
+            truncated=choices[0].get("finish_reason") == "length",
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

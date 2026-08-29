@@ -148,9 +148,16 @@ def build_tts(agent: AgentConfig) -> TTSProvider:
     key = _credential_for("tts", agent.tts_provider)
     fallback = agent.language
     if agent.tts_provider == "sarvam":
-        return SarvamTTS(api_key=key, voice=agent.tts_voice, fallback_language=fallback)
+        return SarvamTTS(
+            api_key=key, voice=agent.tts_voice, fallback_language=fallback,
+            speaking_rate=agent.tts_speaking_rate, pitch=agent.tts_pitch,
+        )
     if agent.tts_provider == "google":
-        return GoogleTTS(api_key=key, voice=agent.tts_voice, fallback_language=fallback)
+        return GoogleTTS(
+            api_key=key, voice=agent.tts_voice, fallback_language=fallback,
+            speaking_rate=agent.tts_speaking_rate, pitch=agent.tts_pitch,
+            pause_ms=agent.tts_pause_ms,
+        )
     return BhashiniTTS(api_key=key, voice=agent.tts_voice, fallback_language=fallback)
 
 

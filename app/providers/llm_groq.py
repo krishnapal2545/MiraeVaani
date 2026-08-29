@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Any
 
-from app.providers.base import LLMProvider, LLMReply, ToolCall
+from app.providers.base import LLMProvider, LLMReply, ToolCall, to_openai_messages
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,10 @@ class GroqLLM(LLMProvider):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": [{"role": "system", "content": system}, *messages],
+            "messages": [
+                {"role": "system", "content": system},
+                *to_openai_messages(messages),
+            ],
             "temperature": temperature,
             "max_tokens": max_output_tokens,
         }
@@ -95,11 +98,13 @@ class GroqLLM(LLMProvider):
         ]
 
         text = THINK_BLOCK.sub("", message.content or "").strip()
+        finish = response.choices[0].finish_reason
         error = ""
         if not text and not calls:
             # An empty reply is normally a reasoning model spending the whole
             # budget on thinking; say so rather than letting the fallback line
             # look like the caller was misheard.
-            finish = response.choices[0].finish_reason
             error = f"{self._model} returned no text (finish_reason={finish})"
-        return LLMReply(text=text, tool_calls=calls, error=error)
+        return LLMReply(
+            text=text, tool_calls=calls, error=error, truncated=(finish == "length")
+        )

@@ -16,7 +16,12 @@ from typing import AsyncGenerator
 import httpx
 
 from app.audio import mp3_to_mulaw8k
-from app.providers.base import TTSProvider, split_sentences
+from app.providers.base import (
+    TTSProvider,
+    normalize_pauses,
+    split_sentences,
+    strip_pauses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,14 @@ VOICES = [
     {"id": "te-f1", "name": "Telugu Female 1", "language": "te-IN"},
 ]
 
+# Voice used when the agent speaks a language its configured voice cannot.
+# Without this a hi-f3 agent reads Marathi replies with a Hindi voice: same
+# script, so no error, but every word comes out mispronounced.
+AUTO_VOICE = {
+    "hi-IN": "hi-f3", "en-IN": "Female3", "ta-IN": "ta-f1",
+    "bn-IN": "bn-f1", "mr-IN": "mr-f1", "te-IN": "te-f1",
+}
+
 
 class BhashiniTTS(TTSProvider):
     name = "bhashini"
@@ -55,6 +68,11 @@ class BhashiniTTS(TTSProvider):
         self._style = style
         self._base_url = base_url.rstrip("/")
         self._fallback_language = fallback_language
+        # Bhashini voice ids are not BCP-47 ("hi-f3", "Female3"), so the voice's
+        # own language is looked up in the catalog rather than parsed.
+        self._voice_locale = next(
+            (v["language"] for v in VOICES if v["id"] == voice), fallback_language
+        )
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             headers={"X-API-KEY": api_key},
@@ -66,23 +84,28 @@ class BhashiniTTS(TTSProvider):
     async def synthesize_streaming(
         self, text: str, language: str | None = None
     ) -> AsyncGenerator[bytes, None]:
-        text = text.strip()
+        # Bhashini takes plain text only — pause marks become commas.
+        text = strip_pauses(normalize_pauses(text.strip()))
         if not text:
             return
 
-        lang_name = LANGUAGE_MAP.get(language or self._fallback_language, "Hindi")
+        lang = language or self._fallback_language
+        lang_name = LANGUAGE_MAP.get(lang, "Hindi")
+        voice = AUTO_VOICE.get(lang, self._voice) if self._voice_locale != lang else self._voice
 
         for sentence in split_sentences(text):
-            mp3_bytes = await self._call_api(sentence, lang_name)
+            mp3_bytes = await self._call_api(sentence, lang_name, voice)
             if mp3_bytes:
                 # ffmpeg fork off the event loop
                 yield await asyncio.to_thread(mp3_to_mulaw8k, mp3_bytes)
 
-    async def _call_api(self, text: str, language: str) -> bytes | None:
+    async def _call_api(
+        self, text: str, language: str, voice: str | None = None
+    ) -> bytes | None:
         payload = {
             "text": text,
             "language": language,
-            "voiceName": self._voice,
+            "voiceName": voice or self._voice,
             "voiceStyle": self._style,
         }
         try:

@@ -9,6 +9,8 @@ Two rules make UI-supplied credentials work, and both are load-bearing:
    the tool loop live in `dialog.py`, so providers stay stateless.
 """
 
+import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
@@ -25,6 +27,10 @@ class ToolCall:
 class LLMReply:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # True when generation stopped at the token limit rather than because the
+    # model finished. The tail is then a fragment, and TTS reads fragments
+    # aloud — the caller hears the agent stop mid-word.
+    truncated: bool = False
     # Why the reply is empty, when it is empty. A silent fallback line on every
     # turn (a retired model id, an unfunded account) is otherwise invisible to
     # anyone watching the call in the UI.
@@ -67,6 +73,48 @@ TOOLS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
+
+
+def to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Render DialogEngine history in the wire shape OpenAI-style APIs expect.
+
+    Tool calls travel through history as plain dicts so the engine stays
+    provider-agnostic; on the wire they become `tool_calls`, whose arguments are
+    a JSON *string*, not an object. Sending the assistant turn without them
+    orphans the `role: tool` message that answers it — which the model then
+    reads as a free-floating instruction rather than as a tool result.
+    """
+    wire: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        calls = msg.get("tool_calls")
+        if role == "assistant" and calls:
+            wire.append({
+                "role": "assistant",
+                "content": msg.get("content") or "",
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(
+                                call.get("arguments") or {}, ensure_ascii=False
+                            ),
+                        },
+                    }
+                    for call in calls
+                ],
+            })
+        elif role == "tool":
+            wire.append({
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id", ""),
+                "content": msg.get("content") or "",
+            })
+        else:
+            wire.append({"role": role, "content": msg.get("content") or ""})
+    return wire
 
 
 class STTProvider(ABC):
@@ -127,6 +175,53 @@ class LLMProvider(ABC):
 
     async def close(self) -> None:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Pauses
+#
+# A model asked to sound human writes "जी बिलकुल... एक मिनट". Every TTS engine
+# here would otherwise read that as a sentence break (or, worse, say "dot dot
+# dot"), so the marker is normalised to a single character on the way in and
+# each provider decides what to do with it: Google turns it into an SSML break,
+# engines without SSML get a comma, which they already pause on.
+# ---------------------------------------------------------------------------
+PAUSE_MARK = "…"
+
+_ELLIPSIS_RE = re.compile(r"\s*(?:\.\s*){2,}\.?\s*|\s*…\s*")
+_MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
+
+
+def normalize_pauses(text: str) -> str:
+    """Collapse '...' / '. . .' / '…' into a single PAUSE_MARK with one space."""
+    return _MULTI_SPACE_RE.sub(" ", _ELLIPSIS_RE.sub(f" {PAUSE_MARK} ", text)).strip()
+
+
+def strip_pauses(text: str, replacement: str = ", ") -> str:
+    """Render pause marks for an engine with no SSML — a comma is a real pause."""
+    cleaned = text.replace(f" {PAUSE_MARK} ", replacement).replace(PAUSE_MARK, replacement)
+    # A pause mark that landed next to punctuation must not become ", ," or " ,".
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s*([,.।?!])", r"\1", cleaned)
+    return _MULTI_SPACE_RE.sub(" ", cleaned).strip()
+
+
+def to_ssml(text: str, pause_ms: int = 350, comma_ms: int = 0) -> str:
+    """Wrap text as SSML, turning pause marks into explicit breaks.
+
+    `comma_ms` adds a small extra beat after commas. Engines already pause
+    there; a little more is what makes a read sound spoken rather than
+    recited, but too much sounds hesitant, so it is off unless asked for.
+    """
+    escaped = (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    escaped = escaped.replace(
+        PAUSE_MARK, f'<break time="{max(int(pause_ms), 0)}ms"/>'
+    )
+    if comma_ms > 0:
+        escaped = escaped.replace(",", f',<break time="{int(comma_ms)}ms"/>')
+    return f"<speak>{escaped}</speak>"
 
 
 def split_sentences(text: str) -> list[str]:

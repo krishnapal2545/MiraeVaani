@@ -72,8 +72,17 @@
           </label>
           <label>Language <select id="f-language"></select></label>
         </div>
-        <p class="note">Auto lets the caller switch language mid-call. Fixed stops a
-          single mis-detection from changing the agent's voice.</p>
+        <label>Allowed languages (auto mode)
+          <select id="f-allowed-languages" multiple size="6"></select>
+        </label>
+        <div class="two">
+          <label>Turns before switching <input id="f-lang-switch-turns" type="number" min="1" max="5"></label>
+          <label>Ignore clips under (s) <input id="f-lang-switch-secs" type="number" step="0.1" min="0" max="4"></label>
+        </div>
+        <p class="note">Auto follows the caller, but only after the same language is
+          detected on consecutive turns — one bad guess on a short clip no longer flips
+          the call. Select nothing to allow every language the STT can return.
+          Fixed ignores detection entirely.</p>
 
         <h3>Language model</h3>
         <div class="two">
@@ -98,6 +107,17 @@
           <span class="note inline" id="preview-status"></span>
         </div>
         <p class="note" id="tts-note"></p>
+        <div class="two">
+          <label>Speaking rate <input id="f-tts-rate" type="number" step="0.05" min="0.5" max="1.6"></label>
+          <label>Pitch (semitones) <input id="f-tts-pitch" type="number" step="0.5" min="-10" max="10"></label>
+        </div>
+        <label>Pause length for "..." (ms)
+          <input id="f-tts-pause" type="number" step="50" min="0" max="1500">
+        </label>
+        <p class="note">The agent writes "..." where a person would pause. Slightly
+          under 1.0 rate reads as considered rather than rushed. The voice follows the
+          language actually being spoken, not the one selected here — this picks the
+          voice for the agent's own language.</p>
 
         <h3>Smart fillers</h3>
         <label class="check">
@@ -112,9 +132,28 @@
 
         <h3>Turn detection</h3>
         <div class="two">
-          <label>Silence threshold (RMS) <input id="f-rms" type="number" min="50" max="2000"></label>
+          <label>Minimum threshold (RMS) <input id="f-rms" type="number" min="50" max="2000"></label>
           <label>End of turn (s) <input id="f-silence" type="number" step="0.1" min="0.2" max="3"></label>
         </div>
+        <div class="two">
+          <label>Noise margin (× room) <input id="f-noise-margin" type="number" step="0.1" min="1.1" max="6"></label>
+          <label>Min utterance (s) <input id="f-min-utterance" type="number" step="0.1" min="0.1" max="2"></label>
+        </div>
+        <div class="two">
+          <label>Barge-in after (s) <input id="f-barge" type="number" step="0.05" min="0.1" max="2"></label>
+          <label>Barge-in grace (s) <input id="f-barge-grace" type="number" step="0.1" min="0" max="3"></label>
+        </div>
+        <div class="two">
+          <label>Check "can you hear me?" after (s) <input id="f-no-reply" type="number" step="0.5" min="0" max="30"></label>
+          <label>Check-ins before hanging up <input id="f-no-reply-prompts" type="number" min="1" max="5"></label>
+        </div>
+        <p class="note">The live threshold tracks the room and sits this many times
+          above it, so the RMS box is a floor rather than the whole rule. Raise the
+          noise margin when background voices are getting answered; raise barge-in
+          seconds when the agent is cut off by coughs or line echo.
+          When nothing comes back for the check interval the agent asks whether it
+          can be heard — and if audio was heard but discarded, it asks the caller to
+          speak louder instead. Set the interval to 0 to never ask.</p>
 
         <h3>Escalation</h3>
         <label>Redirect number (human handoff)

@@ -35,6 +35,7 @@ from app.call_handler import CallSession  # noqa: E402
 from app.dialog import DialogEngine  # noqa: E402
 from app.fillers import FillerBank, FillerController  # noqa: E402
 from app.models import AgentConfig  # noqa: E402
+from app.prompts import check_in_line, no_reply_goodbye  # noqa: E402
 from app.providers.base import LLMProvider, LLMReply, STTProvider, ToolCall, TTSProvider  # noqa: E402
 
 SILENT = bytes([0xFF]) * 160     # ~20ms of mu-law near-silence
@@ -153,11 +154,15 @@ class FakeTwilio:
         return sum(1 for p in self.sent if p.get("event") == "clear")
 
 
-async def run_case(name, *, llm_delay, filler_delay_ms, fillers_on=True, end_call=False):
+async def run_case(name, *, llm_delay, filler_delay_ms, fillers_on=True, end_call=False,
+                   min_utterance_seconds=0.3, no_reply_seconds=0.0, no_reply_prompts=2,
+                   speech_ms=600, silence_ms=1200, tail_wait=None):
     agent = AgentConfig(
         name="Test", system_prompt="You are a test agent.",
         fillers_enabled=fillers_on, filler_delay_ms=filler_delay_ms,
-        silence_threshold_rms=300, silence_end_seconds=0.8, min_utterance_seconds=0.3,
+        silence_threshold_rms=300, silence_end_seconds=0.8,
+        min_utterance_seconds=min_utterance_seconds,
+        no_reply_seconds=no_reply_seconds, no_reply_prompts=no_reply_prompts,
         greeting_mode="static", greeting_text="Namaste.",
     )
     call_id = f"t-{uuid.uuid4().hex[:8]}"
@@ -174,7 +179,10 @@ async def run_case(name, *, llm_delay, filler_delay_ms, fillers_on=True, end_cal
         await bank.warm()
         controller = FillerController(bank, enabled=True)
 
-    ws = FakeTwilio(tail_wait=max(2.0, llm_delay + 1.5))
+    ws = FakeTwilio(
+        speech_ms=speech_ms, silence_ms=silence_ms,
+        tail_wait=tail_wait if tail_wait is not None else max(2.0, llm_delay + 1.5),
+    )
     session = CallSession(
         ws, agent=agent, stt=stt, tts=tts, dialog=dialog, fillers=controller,
         call_id=call_id, logs_dir=os.environ["LOGS_DIR"], twilio_creds={},
@@ -216,6 +224,51 @@ async def main():
     s, ws, filler = await run_case("end call", llm_delay=0.02, filler_delay_ms=400,
                                    end_call=True)
     assert s.dialog.signals.end_call, "end_call tool did not set the signal"
+
+    print("\n[5] Caller says nothing -> agent asks if it can be heard, then closes")
+    s, ws, filler = await run_case("no reply", llm_delay=0.02, filler_delay_ms=400,
+                                   fillers_on=False, speech_ms=0, silence_ms=0,
+                                   no_reply_seconds=0.4, no_reply_prompts=1,
+                                   tail_wait=3.0)
+    spoken = tuple(t for t in s.tts.calls if t != "Namaste.")
+    assert spoken, "agent waited in silence instead of checking the line"
+    assert spoken[0] == check_in_line("hi-IN"), \
+        f"first check-in was not a check-in: {spoken[0]!r}"
+    assert spoken[-1] == no_reply_goodbye("hi-IN"), \
+        f"agent never closed the unanswered call: {spoken}"
+    # The model has to see its own check-ins, or it answers a question it does
+    # not know it asked.
+    assert [m["content"] for m in s.dialog.history if m["role"] == "assistant"][-1] \
+        == spoken[-1], "check-ins were not written into the dialog history"
+
+    print("\n[6] A short, loud 'Hello' is a turn, not background")
+    s, ws, filler = await run_case("short word", llm_delay=0.02, filler_delay_ms=400,
+                                   fillers_on=False, speech_ms=240,
+                                   min_utterance_seconds=0.5, tail_wait=2.0)
+    assert s._turn == 1, "a one-word answer was discarded as background noise"
+
+    print("\n[7] Control tags never reach the caller's ear or the history")
+    class Echo(LLMProvider):
+        async def complete(self, messages, system, tools=None, temperature=0.4,
+                           max_output_tokens=150):
+            self.seen = [dict(m) for m in messages]
+            # What gpt-oss-20b actually did: recite the instructions back.
+            return LLMReply(text="Hi, this is Vaani. [detected_language=hi-IN] "
+                                 "[You have already greeted this caller.] Hi Krishna.")
+
+    echo = Echo()
+    d = DialogEngine(echo, "You are Vaani.")
+    await d.generate_greeting("", "hi-IN")
+    reply = await d.respond("Hello", "en-IN")
+    said = [m["content"] for m in d.history if m["role"] == "assistant"]
+    heard = [m["content"] for m in echo.seen if m["role"] == "user"]
+    print(f"    spoken: {reply}")
+    print(f"    caller turns as the model sees them: {heard}")
+    assert "[" not in reply, f"a control tag was spoken aloud: {reply!r}"
+    assert not any("[" in t for t in said), f"a tag was stored in history: {said}"
+    # Only the opening cue may be bracketed, because nothing the caller said
+    # exists yet; every real turn is the caller's words alone.
+    assert heard[-1] == "Hello", f"instructions leaked into the caller's turn: {heard[-1]!r}"
 
     print("\n" + "-" * 60)
     print("ALL SESSION CHECKS PASSED\n")

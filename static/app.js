@@ -91,6 +91,7 @@ async function loadCatalog() {
   fillSelect($("f-llm-provider"), CATALOG.llm, "provider", "label");
   fillSelect($("f-tts-provider"), CATALOG.tts, "provider", "label");
   fillSelect($("f-language"), CATALOG.languages, "code", "name");
+  fillSelect($("f-allowed-languages"), CATALOG.languages, "code", "name");
 
   const starter = $("f-starter");
   starter.innerHTML = '<option value="">— template —</option>';
@@ -117,6 +118,13 @@ $("f-starter").addEventListener("change", (e) => {
   const starter = CATALOG.starters.find((s) => s.id === e.target.value);
   if (starter) {
     $("f-prompt").value = starter.body;
+    /* The opening line is part of the template. Sending it as a fixed string
+       rather than asking the LLM for it removes ~1.8s of dead air on connect,
+       which is long enough that the callee says "hello?" into the silence. */
+    if (starter.greeting) {
+      $("f-greeting-mode").value = "static";
+      $("f-greeting-text").value = starter.greeting;
+    }
     refreshPromptVars();
   }
 });
@@ -166,12 +174,18 @@ function formToAgent() {
     stt_model: $("f-stt-model").value,
     language_mode: $("f-language-mode").value,
     language: $("f-language").value,
+    allowed_languages: selectedValues("f-allowed-languages").join(","),
+    language_switch_turns: parseInt($("f-lang-switch-turns").value, 10) || 2,
+    language_switch_min_seconds: parseFloat($("f-lang-switch-secs").value) || 1.0,
     llm_provider: $("f-llm-provider").value,
     llm_model: $("f-llm-model").value,
     temperature: parseFloat($("f-temperature").value) || 0.4,
-    max_output_tokens: parseInt($("f-max-tokens").value, 10) || 150,
+    max_output_tokens: parseInt($("f-max-tokens").value, 10) || 220,
     tts_provider: $("f-tts-provider").value,
     tts_voice: $("f-tts-voice").value,
+    tts_speaking_rate: numOr("f-tts-rate", 0.95),
+    tts_pitch: numOr("f-tts-pitch", 0),
+    tts_pause_ms: numOr("f-tts-pause", 350, true),
     system_prompt: $("f-prompt").value,
     greeting_mode: $("f-greeting-mode").value,
     greeting_text: $("f-greeting-text").value,
@@ -179,9 +193,30 @@ function formToAgent() {
     filler_delay_ms: parseInt($("f-filler-delay").value, 10) || 350,
     silence_threshold_rms: parseInt($("f-rms").value, 10) || 300,
     silence_end_seconds: parseFloat($("f-silence").value) || 0.8,
-    min_utterance_seconds: 0.3,
+    min_utterance_seconds: numOr("f-min-utterance", 0.4),
+    noise_margin: numOr("f-noise-margin", 2.0),
+    barge_in_seconds: numOr("f-barge", 0.5),
+    barge_in_grace_seconds: numOr("f-barge-grace", 0.7),
+    no_reply_seconds: numOr("f-no-reply", 6.0),
+    no_reply_prompts: numOr("f-no-reply-prompts", 2, true),
     redirect_number: $("f-redirect").value.trim(),
   };
+}
+
+// `parseFloat(x) || fallback` silently rewrites a deliberate 0 — which is a
+// real setting for the grace period and the pause length.
+function numOr(id, fallback, integer = false) {
+  const raw = (integer ? parseInt($(id).value, 10) : parseFloat($(id).value));
+  return Number.isFinite(raw) ? raw : fallback;
+}
+
+function selectedValues(id) {
+  return [...$(id).selectedOptions].map((o) => o.value);
+}
+
+function setSelectedValues(id, csv) {
+  const wanted = new Set((csv || "").split(",").map((s) => s.trim()).filter(Boolean));
+  [...$(id).options].forEach((o) => { o.selected = wanted.has(o.value); });
 }
 
 function agentToForm(a) {
@@ -190,12 +225,18 @@ function agentToForm(a) {
   refreshSttModels(a.stt_model);
   $("f-language-mode").value = a.language_mode;
   $("f-language").value = a.language;
+  setSelectedValues("f-allowed-languages", a.allowed_languages);
+  $("f-lang-switch-turns").value = a.language_switch_turns;
+  $("f-lang-switch-secs").value = a.language_switch_min_seconds;
   $("f-llm-provider").value = a.llm_provider;
   refreshLlmModels(a.llm_model);
   $("f-temperature").value = a.temperature;
   $("f-max-tokens").value = a.max_output_tokens;
   $("f-tts-provider").value = a.tts_provider;
   refreshVoices(a.tts_voice);
+  $("f-tts-rate").value = a.tts_speaking_rate;
+  $("f-tts-pitch").value = a.tts_pitch;
+  $("f-tts-pause").value = a.tts_pause_ms;
   $("f-prompt").value = a.system_prompt || "";
   $("f-greeting-mode").value = a.greeting_mode;
   $("f-greeting-text").value = a.greeting_text || "";
@@ -204,6 +245,12 @@ function agentToForm(a) {
   $("filler-delay-label").textContent = a.filler_delay_ms;
   $("f-rms").value = a.silence_threshold_rms;
   $("f-silence").value = a.silence_end_seconds;
+  $("f-min-utterance").value = a.min_utterance_seconds;
+  $("f-noise-margin").value = a.noise_margin;
+  $("f-barge").value = a.barge_in_seconds;
+  $("f-barge-grace").value = a.barge_in_grace_seconds;
+  $("f-no-reply").value = a.no_reply_seconds;
+  $("f-no-reply-prompts").value = a.no_reply_prompts;
   $("f-redirect").value = a.redirect_number || "";
   refreshPromptVars();
 }
@@ -211,12 +258,17 @@ function agentToForm(a) {
 const DEFAULT_AGENT = {
   name: "", stt_provider: "sarvam", stt_model: "saarika:v2.5",
   language_mode: "auto", language: "hi-IN",
+  allowed_languages: "", language_switch_turns: 2, language_switch_min_seconds: 1.0,
   llm_provider: "gemini", llm_model: "gemini-2.5-flash-lite",
-  temperature: 0.4, max_output_tokens: 150,
+  temperature: 0.4, max_output_tokens: 220,
   tts_provider: "sarvam", tts_voice: "anushka",
+  tts_speaking_rate: 0.95, tts_pitch: 0, tts_pause_ms: 350,
   system_prompt: "", greeting_mode: "llm", greeting_text: "",
   fillers_enabled: true, filler_delay_ms: 350,
-  silence_threshold_rms: 300, silence_end_seconds: 0.8, redirect_number: "",
+  silence_threshold_rms: 300, silence_end_seconds: 0.8, min_utterance_seconds: 0.4,
+  noise_margin: 2.0, barge_in_seconds: 0.5, barge_in_grace_seconds: 0.7,
+  no_reply_seconds: 6.0, no_reply_prompts: 2,
+  redirect_number: "",
 };
 
 async function openBuilder(agentId) {
@@ -227,7 +279,12 @@ async function openBuilder(agentId) {
     agentToForm(agent);
   } else {
     $("builder-title").textContent = "New agent";
-    agentToForm({ ...DEFAULT_AGENT, system_prompt: CATALOG.starters[0].body });
+    agentToForm({
+      ...DEFAULT_AGENT,
+      system_prompt: CATALOG.starters[0].body,
+      greeting_mode: CATALOG.starters[0].greeting ? "static" : "llm",
+      greeting_text: CATALOG.starters[0].greeting || "",
+    });
   }
   show("builder");
 }
@@ -413,6 +470,45 @@ function watchCall(callId) {
         break;
       case "barge_in":
         bubble("Caller interrupted", "—", "filler user");
+        break;
+      case "noise_rejected":
+        // Shown, not hidden: "the agent ignored me" and "the agent answered the
+        // television" look identical from outside, and this is the line that
+        // tells them apart while tuning.
+        bubble(
+          "Ignored as background",
+          e.reason === "empty_transcript"
+            ? `"${e.transcript}"`
+            : `${e.reason} · peak ${e.peak_rms} vs room ${e.noise_floor}`,
+          "filler user"
+        );
+        break;
+      case "language_held":
+        bubble(
+          "Kept " + e.language,
+          `detected ${e.detected} — ${e.reason}`,
+          "filler agent"
+        );
+        break;
+      case "language_switched":
+        bubble("Switched language", e.language, "filler agent");
+        break;
+      case "no_reply":
+        // The agent speaking without the model behind it. Shown as its own kind
+        // of line so a transcript full of check-ins reads as "the caller was
+        // never getting through", which is what it means.
+        bubble(
+          e.closing ? "No answer — closing the call" : "Checking the caller can hear",
+          `${e.spoken} (${e.reason}, ${e.rejected} discarded)`,
+          "filler agent"
+        );
+        break;
+      case "voice_language_corrected":
+        bubble(
+          "Reply was in the wrong language",
+          `${e.script} text on a ${e.call_language} call — spoken as ${e.spoken_language}`,
+          "filler agent"
+        );
         break;
       case "call_end":
         setStatus("completed");

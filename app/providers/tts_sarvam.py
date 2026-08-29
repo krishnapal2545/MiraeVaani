@@ -11,7 +11,12 @@ from typing import AsyncGenerator
 import httpx
 
 from app.audio import wav_to_mulaw8k
-from app.providers.base import TTSProvider, split_sentences
+from app.providers.base import (
+    TTSProvider,
+    normalize_pauses,
+    split_sentences,
+    strip_pauses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +42,18 @@ class SarvamTTS(TTSProvider):
         voice: str = "anushka",
         model: str = "bulbul:v2",
         fallback_language: str = "hi-IN",
+        speaking_rate: float = 1.0,
+        pitch: float = 0.0,
     ) -> None:
         self._voice = voice
         self._model = model
         self._fallback_language = fallback_language
+        # Sarvam calls it `pace`, and clamps outside 0.3-3.0.
+        self._pace = min(max(float(speaking_rate), 0.3), 3.0)
+        # `tts_pitch` is authored in Google's semitones (-20..20); Bulbul takes
+        # a fraction, so the same agent setting is rescaled rather than
+        # meaning something different per provider.
+        self._pitch = min(max(float(pitch) / 20.0, -0.75), 0.75)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             headers={"api-subscription-key": api_key},
@@ -52,7 +65,9 @@ class SarvamTTS(TTSProvider):
     async def synthesize_streaming(
         self, text: str, language: str | None = None
     ) -> AsyncGenerator[bytes, None]:
-        text = text.strip()
+        # Bulbul has no SSML, so pause marks become commas — which it does
+        # pause on, and which never get read aloud as "dot dot dot".
+        text = strip_pauses(normalize_pauses(text.strip()))
         if not text:
             return
 
@@ -73,6 +88,8 @@ class SarvamTTS(TTSProvider):
             "model": self._model,
             "speech_sample_rate": 8000,
             "enable_preprocessing": True,
+            "pace": self._pace,
+            "pitch": self._pitch,
         }
         try:
             response = await self._client.post(SARVAM_TTS_URL, json=payload)

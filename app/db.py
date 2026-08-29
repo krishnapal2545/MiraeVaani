@@ -92,12 +92,46 @@ CREATE INDEX IF NOT EXISTS idx_turns_call ON call_turns(call_id, turn);
 
 _AGENT_FIELDS = [
     "name", "stt_provider", "stt_model", "language_mode", "language",
+    "allowed_languages", "language_switch_turns", "language_switch_min_seconds",
     "llm_provider", "llm_model", "temperature", "max_output_tokens",
-    "tts_provider", "tts_voice", "system_prompt", "greeting_mode",
-    "greeting_text", "fillers_enabled", "filler_delay_ms",
+    "tts_provider", "tts_voice", "tts_speaking_rate", "tts_pitch", "tts_pause_ms",
+    "system_prompt", "greeting_mode", "greeting_text",
+    "fillers_enabled", "filler_delay_ms",
     "silence_threshold_rms", "silence_end_seconds", "min_utterance_seconds",
+    "noise_margin", "barge_in_seconds", "barge_in_grace_seconds",
+    "no_reply_seconds", "no_reply_prompts",
     "redirect_number",
 ]
+
+# Columns added after the first release. `CREATE TABLE IF NOT EXISTS` is a no-op
+# on an existing database, so a schema change that is not also listed here is a
+# schema change that only works on a fresh install. Each entry is
+# (column, SQL type, default) and is applied idempotently at connect time.
+_AGENT_MIGRATIONS: list[tuple[str, str, Any]] = [
+    ("allowed_languages", "TEXT", ""),
+    ("language_switch_turns", "INTEGER", 2),
+    ("language_switch_min_seconds", "REAL", 1.0),
+    ("tts_speaking_rate", "REAL", 0.95),
+    ("tts_pitch", "REAL", 0.0),
+    ("tts_pause_ms", "INTEGER", 350),
+    ("noise_margin", "REAL", 2.0),
+    ("barge_in_seconds", "REAL", 0.5),
+    ("barge_in_grace_seconds", "REAL", 0.7),
+    ("no_reply_seconds", "REAL", 6.0),
+    ("no_reply_prompts", "INTEGER", 2),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
+    for column, sql_type, default in _AGENT_MIGRATIONS:
+        if column in existing:
+            continue
+        literal = f"'{default}'" if isinstance(default, str) else str(default)
+        conn.execute(
+            f"ALTER TABLE agents ADD COLUMN {column} {sql_type} "
+            f"NOT NULL DEFAULT {literal}"
+        )
 
 
 def _now() -> str:
@@ -110,6 +144,7 @@ def connect() -> sqlite3.Connection:
         _conn = sqlite3.connect(get_settings().DB_PATH, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
         _conn.executescript(SCHEMA)
+        _migrate(_conn)
         _conn.commit()
     return _conn
 
