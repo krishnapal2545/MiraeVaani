@@ -761,6 +761,30 @@ def campaign_stats(campaign_id: str) -> dict[str, int]:
     return {r["status"]: int(r["n"]) for r in rows}
 
 
+def retarget_pending(campaign_id: str, agent_id: str, list_id: str) -> int:
+    """Realign the queue after a campaign's agent or contact list was changed.
+
+    Only `pending` rows move: a target already `dialing` is mid-conversation
+    under the old agent and has to settle there. Contacts dropped from the
+    queue are cancelled rather than deleted so they still show in the stats.
+    """
+    with _lock:
+        conn = connect()
+        conn.execute(
+            "UPDATE campaign_targets SET status='cancelled' "
+            "WHERE campaign_id=? AND status='pending' AND contact_id NOT IN "
+            "      (SELECT id FROM contacts WHERE list_id=?)",
+            (campaign_id, list_id),
+        )
+        cursor = conn.execute(
+            "UPDATE campaign_targets SET agent_id=? "
+            "WHERE campaign_id=? AND status='pending' AND agent_id<>?",
+            (agent_id, campaign_id, agent_id),
+        )
+        conn.commit()
+    return cursor.rowcount
+
+
 def cancel_pending_targets(campaign_id: str) -> int:
     with _lock:
         cursor = connect().execute(

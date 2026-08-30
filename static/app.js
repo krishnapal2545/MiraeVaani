@@ -1221,44 +1221,90 @@ function stopCampaignPolling() {
   CAMPAIGN_TIMER = null;
 }
 
-$("new-campaign").onclick = async () => {
-  const panel = $("campaign-form");
-  panel.classList.toggle("hidden");
-  if (panel.classList.contains("hidden")) return;
+let EDITING_CAMPAIGN = null;   // campaign being edited, or null for a new one
+
+const DEFAULT_CAMPAIGN = {
+  name: "", agent_id: "", list_id: "", timezone: "Asia/Kolkata",
+  window_start: "10:00", window_end: "19:00", days: "0,1,2,3,4",
+  max_concurrent: 2, max_attempts: 3, retry_after_minutes: 120,
+};
+
+async function openCampaignForm(campaign) {
+  EDITING_CAMPAIGN = campaign;
+  const values = campaign || DEFAULT_CAMPAIGN;
   const [{ agents }, { lists }] = await Promise.all([
     api("/api/agents"),
     api("/api/contact-lists"),
   ]);
-  $("cf-agent").innerHTML = agents
-    .map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`)
-    .join("");
-  $("cf-list").innerHTML = lists
-    .map((l) => `<option value="${l.id}">${escapeHtml(l.name)} (${l.contact_count})</option>`)
-    .join("");
-  if (!lists.length) toast("Upload a contact list first", true);
+  fillSelect($("cf-agent"), agents, "id", "name", values.agent_id || undefined);
+  fillSelect(
+    $("cf-list"),
+    lists.map((l) => ({ id: l.id, label: `${l.name} (${l.contact_count})` })),
+    "id", "label", values.list_id || undefined
+  );
+
+  $("cf-title").textContent = campaign ? "Edit campaign" : "New campaign";
+  $("cf-save").textContent = campaign ? "Save changes" : "Create campaign";
+  $("cf-name").value = values.name;
+  $("cf-tz").value = values.timezone;
+  $("cf-start").value = values.window_start;
+  $("cf-end").value = values.window_end;
+  $("cf-concurrent").value = values.max_concurrent;
+  $("cf-attempts").value = values.max_attempts;
+  $("cf-retry").value = values.retry_after_minutes;
+  const days = String(values.days || "").split(",");
+  document.querySelectorAll(".cf-day").forEach((c) => { c.checked = days.includes(c.value); });
+
+  // Repointing the queue under a running worker would misroute calls, so the
+  // server refuses it; the form says so rather than letting the save fail.
+  const locked = Boolean(campaign) && campaign.status === "running";
+  $("cf-agent").disabled = locked;
+  $("cf-list").disabled = locked;
+  $("cf-locked-note").classList.toggle("hidden", !locked);
+
+  $("campaign-form").classList.remove("hidden");
+  if (!campaign && !lists.length) toast("Upload a contact list first", true);
+}
+
+$("new-campaign").onclick = () => {
+  const panel = $("campaign-form");
+  // The button also closes the panel, but never while an edit is on screen.
+  if (!panel.classList.contains("hidden") && !EDITING_CAMPAIGN) {
+    panel.classList.add("hidden");
+    return;
+  }
+  openCampaignForm(null);
 };
 
-$("cf-cancel").onclick = () => $("campaign-form").classList.add("hidden");
+$("cf-cancel").onclick = () => {
+  EDITING_CAMPAIGN = null;
+  $("campaign-form").classList.add("hidden");
+};
 
 $("cf-save").onclick = async () => {
   const days = [...document.querySelectorAll(".cf-day:checked")].map((c) => c.value);
+  const payload = {
+    name: $("cf-name").value.trim() || "Untitled campaign",
+    agent_id: $("cf-agent").value,
+    list_id: $("cf-list").value,
+    timezone: $("cf-tz").value.trim() || "Asia/Kolkata",
+    window_start: $("cf-start").value,
+    window_end: $("cf-end").value,
+    days: days.join(","),
+    max_concurrent: Number($("cf-concurrent").value) || 2,
+    max_attempts: Number($("cf-attempts").value) || 3,
+    retry_after_minutes: Number($("cf-retry").value) || 120,
+  };
   try {
-    await api("/api/campaigns", {
-      method: "POST",
-      body: JSON.stringify({
-        name: $("cf-name").value.trim() || "Untitled campaign",
-        agent_id: $("cf-agent").value,
-        list_id: $("cf-list").value,
-        timezone: $("cf-tz").value.trim() || "Asia/Kolkata",
-        window_start: $("cf-start").value,
-        window_end: $("cf-end").value,
-        days: days.join(","),
-        max_concurrent: Number($("cf-concurrent").value) || 2,
-        max_attempts: Number($("cf-attempts").value) || 3,
-        retry_after_minutes: Number($("cf-retry").value) || 120,
-      }),
-    });
-    toast("Campaign created");
+    if (EDITING_CAMPAIGN) {
+      await api(`/api/campaigns/${EDITING_CAMPAIGN.id}`,
+        { method: "PUT", body: JSON.stringify(payload) });
+      toast("Campaign saved");
+    } else {
+      await api("/api/campaigns", { method: "POST", body: JSON.stringify(payload) });
+      toast("Campaign created");
+    }
+    EDITING_CAMPAIGN = null;
     $("campaign-form").classList.add("hidden");
     loadCampaigns();
   } catch (err) {
@@ -1323,6 +1369,9 @@ function campaignCard(campaign, detail) {
       toast(running ? "Paused — calls in progress will finish" : "Campaign started");
       loadCampaigns();
     })
+  );
+  actions.appendChild(
+    button("Edit", "ghost", () => openCampaignForm(campaign))
   );
   if (campaign.status !== "completed") {
     actions.appendChild(

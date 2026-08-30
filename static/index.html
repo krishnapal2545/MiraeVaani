@@ -179,7 +179,7 @@
     </div>
 
     <div id="campaign-form" class="panel hidden">
-      <h3>New campaign</h3>
+      <h3 id="cf-title">New campaign</h3>
       <div class="two">
         <label>Name <input id="cf-name" type="text" placeholder="March shortfall run"></label>
         <label>Agent <select id="cf-agent"></select></label>
@@ -202,6 +202,9 @@
         <label><input type="checkbox" class="cf-day" value="6"> Sun</label>
       </fieldset>
       <p class="note">Calling hours are clamped to 09:00–21:00 local time regardless of what is set here.</p>
+      <p class="note hidden" id="cf-locked-note">
+        Agent and contact list can only be changed while the campaign is paused.
+      </p>
       <div class="row-gap">
         <button class="btn primary" id="cf-save">Create campaign</button>
         <button class="btn ghost" id="cf-cancel">Cancel</button>

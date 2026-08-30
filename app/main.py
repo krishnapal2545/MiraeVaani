@@ -353,9 +353,36 @@ async def post_campaign(request: Request):
 
 @app.put("/api/campaigns/{campaign_id}")
 async def put_campaign(campaign_id: str, request: Request):
-    if db.get_campaign(campaign_id) is None:
+    """Edit a campaign in place. Schedule and limits apply to a running
+    campaign within one dispatch cycle, because the worker re-reads the
+    campaign row every time round.
+
+    Swapping the agent or the list is different: the queued targets carry the
+    agent id they were enqueued with, so they have to be realigned, and doing
+    that under a worker that is claiming from the same rows would hand a few
+    contacts to the wrong agent. Hence the pause requirement.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if campaign is None:
         return JSONResponse(status_code=404, content={"error": "Campaign not found"})
-    db.update_campaign(campaign_id, await request.json())
+
+    body = await request.json()
+    agent_id = body.get("agent_id", campaign["agent_id"])
+    list_id = body.get("list_id", campaign["list_id"])
+    if db.get_agent(agent_id) is None:
+        return JSONResponse(status_code=400, content={"error": "Unknown agent"})
+    if db.get_contact_list(list_id) is None:
+        return JSONResponse(status_code=400, content={"error": "Unknown contact list"})
+
+    moved = agent_id != campaign["agent_id"] or list_id != campaign["list_id"]
+    if moved and campaign["status"] == "running":
+        return JSONResponse(status_code=409, content={
+            "error": "Pause the campaign before changing its agent or contact list."
+        })
+
+    db.update_campaign(campaign_id, body)
+    if moved:
+        db.retarget_pending(campaign_id, agent_id, list_id)
     return db.get_campaign(campaign_id)
 
 
