@@ -87,6 +87,14 @@ class AgentConfig(BaseModel):
     # --- Escalation ---
     redirect_number: str = ""
 
+    # --- Campaign behaviour ---
+    # Ceiling on this agent's simultaneous calls. The worker also honours the
+    # campaign's own cap and the global one, and dials to the lowest of the three.
+    max_concurrent_calls: int = 20
+    # POSTed to when the agent records an outcome, so a decision on the call can
+    # trigger something outside it (a payment link, a CRM update). Empty disables.
+    outcome_webhook_url: str = ""
+
     def resolve_language(self, detected: str | None) -> str:
         """Language to speak in, honouring language_mode."""
         if self.language_mode == "fixed":

@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     # Change this and every saved credential becomes unreadable.
     APP_SECRET: str = "change-me-in-dot-env"
 
+    # Ceiling on simultaneous calls across every agent on this machine, and the
+    # last word over any per-agent or per-campaign setting. Twilio sends one
+    # websocket message per 20ms per call, so a handful of calls is real work
+    # for one Python process — this default is sized for a laptop behind a
+    # tunnel, not for a server.
+    GLOBAL_MAX_CONCURRENT_CALLS: int = 5
+    # How often a worker asks whether its campaigns are owed another call.
+    DISPATCHER_TICK_SECONDS: float = 5.0
+
 
 @lru_cache
 def get_settings() -> Settings:

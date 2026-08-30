@@ -139,9 +139,14 @@ fillers suppresses them, and `end_call` signals a hangup.
 
 ```
 app/
-  main.py          FastAPI: UI, agent/credential CRUD, call API, Twilio webhooks, WS, SSE
+  main.py          FastAPI: UI, CRUD, campaign API, Twilio webhooks, WS proxy, SSE
   models.py        AgentConfig — the object that replaced v5's global Settings
-  db.py            SQLite: agents, credentials, calls, turns
+  db.py            SQLite: agents, credentials, calls, turns, contacts, campaigns
+  dialer.py        placing a call and running the conversation — shared by app and workers
+  worker.py        Vaani: one agent's calling process (a pod, later)
+  runner.py        starts/stops workers; LocalProcessRunner now, KubernetesRunner later
+  contacts.py      CSV parse, phone normalisation, column→$variable mapping
+  schedule.py      calling windows, timezones, and the legal hours clamp
   verify.py        live credential probes run before a key is stored
   crypto.py        Fernet encryption for stored keys
   registry.py      CATALOG + builds providers from an agent row
@@ -152,10 +157,113 @@ app/
   providers/       one adapter per vendor; none may import app.config
 static/            plain HTML/CSS/JS, no build step
 scripts/           test_session.py, check_providers.py
+COMPARISON.md      provider accuracy/latency/cost research (Aug 2026)
 ```
 
 Adding a provider means one adapter under `providers/` and one entry in
 `registry.CATALOG`. Nothing else changes.
+
+---
+
+## Outbound campaigns
+
+The system is two halves. **MiraeVaani** is the management app: one UI and API for
+agents, contacts, campaigns and monitoring, and it owns the database. **Vaani** is
+the worker — one process per agent, which reads that agent's config once at startup,
+dials its campaign list, holds the conversations, and writes each contact's status back.
+
+Using it:
+
+1. **Contacts** — upload a CSV. The agent's prompt already declares what each call
+   needs (`$customer_name`, `$shortfall_amount`, …), so the importer proposes a
+   column mapping and you correct it before anything is stored. Numbers are
+   normalised to E.164 and deduplicated; unusable rows are reported, not dropped.
+2. **Campaigns** — pick an agent and a list, set the calling window, timezone,
+   simultaneous calls and retry policy.
+3. **Start** — the worker comes up and begins dialing when the window is open.
+   Pause stops it claiming new contacts; Stop also cancels what is still queued.
+   Both let calls already in progress finish.
+
+Things worth knowing:
+
+- **Editing an agent restarts its worker.** Config is read once at startup, so an
+  edit drains the old worker — calls in progress finish on the config they began
+  with — and starts a replacement. This is why there is no "did my change take
+  effect?" ambiguity.
+- **Calling hours are clamped to 09:00–21:00** in the campaign's own timezone,
+  whatever the UI is set to. TRAI restricts when commercial calls may be placed.
+- **Three concurrency caps apply** and the lowest wins: the agent's, the campaign's,
+  and `GLOBAL_MAX_CONCURRENT_CALLS` (default 5, sized for a laptop).
+- **Answering-machine detection is on for campaign calls.** Without it a large share
+  of a run holds full conversations with voicemail and logs them as successes.
+- **Unanswered is not failed.** `no-answer`, `busy` and `failed` are retried after
+  the campaign's interval until its attempt budget is spent.
+- **Suppression is checked at dial time**, so someone who asks not to be called
+  during a running campaign is not called again.
+- **Outcome webhook** — set a URL on the agent and it is POSTed the moment an
+  outcome is recorded: the caller's decision, their number, and the contact's
+  variables. This is how a call triggers a payment link or a CRM update while the
+  customer is still on the phone. Fire-and-forget: a slow endpoint cannot stall a call.
+
+### Going to Kubernetes
+
+The laptop build was written so this is a deployment change, not a rewrite. Each
+row is the same worker code either way:
+
+| Concern | Now | Kubernetes |
+|---|---|---|
+| Worker | child process on a local port | pod |
+| Launch / stop | `runner.LocalProcessRunner` | `KubernetesRunner` |
+| Reaching the worker | the WS proxy in `main.py` | Service + Ingress |
+| Event fan-out to the UI | worker POSTs `/api/internal/events` | Redis pub/sub |
+| Store | SQLite in WAL mode | Postgres |
+| Public URL | ngrok | real domain + TLS (`BASE_URL` only) |
+
+What must be dealt with before production:
+
+- **ngrok is development only.** It exists because Twilio has to reach your machine
+  inbound and a laptop has no public IP or certificate. In production `BASE_URL`
+  becomes a real domain; no code depends on the tunnel.
+- **Horizontal scaling is blocked** by `dialer.CALL_CONTEXTS` and the in-process
+  `EventBroker`. Both need Redis before a second management process can run. Live
+  sessions can stay process-local — the WebSocket *is* the session — so sticky
+  sessions are not required.
+- **SQLite → Postgres** before concurrent writers get serious; target claiming then
+  becomes `SELECT ... FOR UPDATE SKIP LOCKED` instead of the single-worker claim.
+- **The WS proxy is a stand-in.** At 50 messages/sec per call per direction it will
+  not carry production traffic; a Service does that job in a cluster.
+- **A `KubernetesRunner` needs cluster write permission** to create and delete pods.
+  That is a real security surface — scope it to one namespace with a minimal Role.
+- **Graceful stop needs `terminationGracePeriodSeconds` ≈ 600** (calls run minutes;
+  the default 30 is far too short) plus a `preStop` hook calling `/shutdown`.
+- **Pods scale with agent count; load scales with call count.** If idle agents get
+  expensive, the same worker binary can run as a fungible autoscaled pool — a
+  deployment change only, since config is read at worker start rather than baked in.
+- **Contacts are claimed in batches**, not loaded wholesale; keep it that way for
+  large lists.
+- **Per-org rate limiting** will be needed if the platform holds the provider keys,
+  or one organisation's campaign will starve the rest. At 600 concurrent calls
+  expect roughly 120 req/s each to STT, LLM and TTS — quota increases have lead time.
+- **Twilio at volume** needs a DID pool with rotation and a CPS increase. Per
+  `COMPARISON.md`, Exotel/Plivo cut telephony cost 40–60% for India-only traffic;
+  telephony should move behind an interface like `app/providers/`.
+
+### Not taken from `miraevaani-enhancements`
+
+That repo (MiraeVaani 4.0) has two things worth folding in later, deliberately kept
+out of this build so that voice quality and campaign logic are not debugged together:
+
+- **Silero VAD** — real speech detection instead of RMS energy, which fixes false
+  barge-ins. Use the ONNX build; the torch build costs ~300MB RSS *per process*,
+  which multiplies badly when every agent is its own process. Worth putting behind a
+  per-agent `energy | silero` toggle so it can be compared on real calls.
+- **Call-centre ambience** under the agent's speech. Do it *after* Silero: that
+  repo's VAD docstring records that the ambience bed echoing back down the line was
+  itself causing the false barge-ins.
+
+Its tone classifier is a prototype (~71% accuracy, 322 rows, three languages) and is
+not ready to drive behaviour, though its shadow-mode pattern — run the new model
+alongside the live one, log both, compare before trusting it — is worth copying.
 
 ---
 
@@ -166,9 +274,12 @@ These are deliberate for a demo build, not oversights:
 - **ffmpeg is required for Bhashini TTS** (it returns MP3). Sarvam and Google
   return WAV and work without it. If `ffmpeg` is not on PATH, Bhashini will fail —
   `check_providers.py` says so explicitly.
-- **Call context is an in-memory dict**, so this is single-process. It is no longer
-  *popped* on read, so a Twilio reconnect no longer kills the call, but horizontal
-  scale needs Redis.
+- **Call context is an in-memory dict**, so the management app is single-process.
+  It is no longer *popped* on read, so a Twilio reconnect no longer kills the call,
+  but horizontal scale needs Redis. Workers are separate processes and do scale.
+- **No org login.** Every table carries `org_id` and credentials resolve org-first
+  then platform, so the multi-tenant split is a change to queries rather than a
+  migration — but there is no authentication yet, so everything is one default org.
 - **No authentication** on any endpoint, including the Twilio webhooks. Anyone who
   can reach the tunnel can place calls on your account.
 - **Batch STT** sets a latency floor of `silence_end_seconds + STT round-trip`.

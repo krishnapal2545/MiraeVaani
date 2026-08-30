@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MiraeVaani — Voice Agents</title>
 <link rel="icon" href="/static/images/vaani_logo.jpg">
-<link rel="stylesheet" href="/static/style.css?v=6.4.1">
+<link rel="stylesheet" href="/static/style.css?v=6.5.0">
 <script>
   /* Applied before first paint so a dark-theme reload never flashes white. */
   try {
@@ -37,6 +37,15 @@
           <span>Agents</span>
         </button>
 
+        <p class="nav-group">Outbound</p>
+        <button class="nav-item" data-view="contacts">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg>
+          <span>Contacts</span>
+        </button>
+        <button class="nav-item" data-view="campaigns">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="M17 8.5a5 5 0 0 1 0 7"/></svg>
+          <span>Campaigns</span>
+        </button>
       </nav>
     </div>
 
@@ -112,6 +121,96 @@
     <p id="agents-empty" class="empty hidden">
       No agents yet. Create one to get started — you'll pick the speech, language
       and voice models, then write what the agent should say.
+    </p>
+  </section>
+
+  <!-- ================= CONTACTS ================= -->
+  <section id="view-contacts" class="view">
+    <div class="view-head">
+      <div>
+        <h2>Contact lists</h2>
+        <p class="subtitle">Upload a CSV and point its columns at the values your agent's prompt asks for.</p>
+      </div>
+      <div class="row-gap">
+        <input id="csv-file" type="file" accept=".csv,text/csv" class="hidden">
+        <button class="btn primary" id="upload-csv">Upload CSV</button>
+      </div>
+    </div>
+
+    <!-- shown between choosing a file and storing it, so a wrong mapping is
+         caught before it becomes a list of real numbers to dial -->
+    <div id="csv-mapping" class="panel hidden">
+      <h3>Map the columns</h3>
+      <p class="subtitle" id="csv-summary"></p>
+      <div class="two">
+        <label>List name <input id="csv-name" type="text" placeholder="March shortfall"></label>
+        <label>Agent this is for
+          <select id="csv-agent"><option value="">— any agent —</option></select>
+        </label>
+        <label>Phone column <select id="csv-phone"></select></label>
+        <label>Name column <select id="csv-namecol"><option value="">— none —</option></select></label>
+      </div>
+      <div id="csv-vars"></div>
+      <div class="row-gap">
+        <button class="btn primary" id="csv-import">Import contacts</button>
+        <button class="btn ghost" id="csv-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr>
+          <th>List</th><th>Source file</th><th>Contacts</th><th>Created</th><th></th>
+        </tr></thead>
+        <tbody id="lists-body"></tbody>
+      </table>
+    </div>
+    <p id="lists-empty" class="empty hidden">No contact lists yet. Upload a CSV to make one.</p>
+  </section>
+
+  <!-- ================= CAMPAIGNS ================= -->
+  <section id="view-campaigns" class="view">
+    <div class="view-head">
+      <div>
+        <h2>Campaigns</h2>
+        <p class="subtitle">An agent, a contact list, and the hours it is allowed to call.</p>
+      </div>
+      <button class="btn primary" id="new-campaign">New campaign</button>
+    </div>
+
+    <div id="campaign-form" class="panel hidden">
+      <h3>New campaign</h3>
+      <div class="two">
+        <label>Name <input id="cf-name" type="text" placeholder="March shortfall run"></label>
+        <label>Agent <select id="cf-agent"></select></label>
+        <label>Contact list <select id="cf-list"></select></label>
+        <label>Timezone <input id="cf-tz" type="text" value="Asia/Kolkata"></label>
+        <label>Calls start at <input id="cf-start" type="time" value="10:00"></label>
+        <label>Calls stop at <input id="cf-end" type="time" value="19:00"></label>
+        <label>Simultaneous calls <input id="cf-concurrent" type="number" min="1" max="20" value="2"></label>
+        <label>Attempts per contact <input id="cf-attempts" type="number" min="1" max="5" value="3"></label>
+        <label>Retry after (minutes) <input id="cf-retry" type="number" min="0" max="1440" value="120"></label>
+      </div>
+      <fieldset class="days">
+        <legend>Days</legend>
+        <label><input type="checkbox" class="cf-day" value="0" checked> Mon</label>
+        <label><input type="checkbox" class="cf-day" value="1" checked> Tue</label>
+        <label><input type="checkbox" class="cf-day" value="2" checked> Wed</label>
+        <label><input type="checkbox" class="cf-day" value="3" checked> Thu</label>
+        <label><input type="checkbox" class="cf-day" value="4" checked> Fri</label>
+        <label><input type="checkbox" class="cf-day" value="5" checked> Sat</label>
+        <label><input type="checkbox" class="cf-day" value="6"> Sun</label>
+      </fieldset>
+      <p class="note">Calling hours are clamped to 09:00–21:00 local time regardless of what is set here.</p>
+      <div class="row-gap">
+        <button class="btn primary" id="cf-save">Create campaign</button>
+        <button class="btn ghost" id="cf-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div id="campaign-list" class="cards"></div>
+    <p id="campaigns-empty" class="empty hidden">
+      No campaigns yet. Create one to dial a contact list with an agent.
     </p>
   </section>
 
@@ -297,6 +396,17 @@
           <label>Redirect number (human handoff)
             <input id="f-redirect" type="text" placeholder="+9198XXXXXXXX">
           </label>
+
+          <h3>Campaigns</h3>
+          <label>Simultaneous calls this agent may run
+            <input id="f-max-concurrent" type="number" min="1" max="50">
+          </label>
+          <label>Outcome webhook
+            <input id="f-webhook" type="url" placeholder="https://your-system.example.com/vaani-outcome">
+          </label>
+          <p class="note">Posted to the moment the agent records an outcome — the caller's
+            decision, the number, and the contact's variables. Use it to send a payment link
+            or update a CRM while the call is still happening. Leave empty to send nothing.</p>
         </div>
       </div>
     </div>
@@ -449,6 +559,6 @@
 </div>
 
 <div id="toast" class="toast"></div>
-<script src="/static/app.js?v=6.4.1"></script>
+<script src="/static/app.js?v=6.5.0"></script>
 </body>
 </html>

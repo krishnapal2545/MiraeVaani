@@ -21,6 +21,7 @@ Endpoints:
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -31,7 +32,17 @@ from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from websockets.asyncio.client import connect as ws_connect
+
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
@@ -39,28 +50,19 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from twilio.rest import Client as TwilioClient
 
-from app import db, registry, verify
+from app import contacts, db, dialer, registry, runner, schedule, verify
 from app.audio import (
     mulaw_to_pcm,
     pcm_to_wav_bytes,
     resample_pcm,
     wav_bytes_to_pcm,
 )
-from app.call_handler import CallSession
 from app.config import get_settings
 from app.crypto import mask
-from app.dialog import DialogEngine
 from app.events import broker
-from app.fillers import FillerBank, FillerController
 from app.models import AgentConfig, CallRequest
-from app.prompts import (
-    STARTER_PROMPTS,
-    build_system_prompt,
-    declared_variables,
-    render,
-)
+from app.prompts import STARTER_PROMPTS, declared_variables
 from app.registry import MissingCredential
 
 settings = get_settings()
@@ -72,26 +74,28 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-# call_id -> {agent_id, variables}. A cache in front of the calls table, not the
-# source of truth: v5 popped an entry when the stream ended, so a Twilio
-# websocket reconnect lost the call's context and killed the call. Entries are
-# only evicted once CALL_CONTEXT_LIMIT newer calls exist.
-CALL_CONTEXTS: dict[str, dict] = {}
-CALL_CONTEXT_LIMIT = 500
+# asyncio only holds a weak reference to a running task, so a fire-and-forget
+# create_task() can be collected part-way through. Restarting a worker must not
+# be abandoned half-done, so the handles are kept until the task finishes.
+_BACKGROUND: set[asyncio.Task] = set()
 
 
-def _remember_context(call_id: str, context: dict) -> None:
-    CALL_CONTEXTS[call_id] = context
-    while len(CALL_CONTEXTS) > CALL_CONTEXT_LIMIT:
-        CALL_CONTEXTS.pop(next(iter(CALL_CONTEXTS)), None)
-
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    # Workers from a previous run are still holding ports and may still be
+    # dialing; their process handles died with that run, so they are found
+    # through the registry rather than adopted.
+    await runner.reap_orphans()
     logger.info("MiraeVaani 6.0 ready. BASE_URL=%s DB=%s",
                 settings.BASE_URL, settings.DB_PATH)
     yield
+    await runner.stop_all()
 
 
 app = FastAPI(title="MiraeVaani 6.0", version="6.0.0", lifespan=lifespan)
@@ -137,6 +141,26 @@ async def _llm_catalog() -> list[dict]:
         {**entry, "models": models or entry["models"], "models_live": bool(models)}
         for entry, models in zip(entries, listings)
     ]
+
+
+async def _check_model_available(agent: AgentConfig) -> str:
+    """The reason the agent cannot dial, or "" if it can.
+
+    A retired model id is indistinguishable from a working agent until the
+    caller picks up and every turn 404s into the fallback line. This costs an
+    HTTP round trip to the provider, so a campaign runs it once when it starts
+    rather than before each of its calls.
+    """
+    credential = registry.credential_key("llm", agent.llm_provider)
+    if not credential:
+        return ""
+    available = await _live_models(agent.llm_provider, credential)
+    if available and agent.llm_model not in available:
+        return (
+            f"'{agent.llm_model}' is not available on your {agent.llm_provider} "
+            f"account. Edit the agent and pick one of: {', '.join(available[:8])}"
+        )
+    return ""
 
 
 @app.get("/api/catalog")
@@ -285,12 +309,287 @@ async def put_agent(agent_id: str, agent: AgentConfig):
     updated = db.update_agent(agent_id, agent)
     if updated is None:
         return JSONResponse(status_code=404, content={"error": "Agent not found"})
+    # A worker holds the config it read at startup, so an edit only reaches it
+    # by replacing it. This runs in the background: the old worker finishes the
+    # calls it already has, each on the config it began the call with.
+    if runner.live_worker(agent_id) is not None:
+        _spawn(runner.restart(agent_id))
     return updated.model_dump()
 
 
 @app.delete("/api/agents/{agent_id}")
 async def remove_agent(agent_id: str):
+    await runner.stop(agent_id, wait=False)
+    db.delete_worker(agent_id)
     db.delete_agent(agent_id)
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Workers
+# ---------------------------------------------------------------------------
+@app.get("/api/workers")
+async def get_workers():
+    return {"workers": db.list_workers()}
+
+
+# ---------------------------------------------------------------------------
+# Campaigns
+# ---------------------------------------------------------------------------
+@app.get("/api/campaigns")
+async def get_campaigns():
+    return {"campaigns": db.list_campaigns()}
+
+
+@app.post("/api/campaigns")
+async def post_campaign(request: Request):
+    body = await request.json()
+    if db.get_agent(body.get("agent_id", "")) is None:
+        return JSONResponse(status_code=400, content={"error": "Unknown agent"})
+    if db.get_contact_list(body.get("list_id", "")) is None:
+        return JSONResponse(status_code=400, content={"error": "Unknown contact list"})
+    return {"id": db.create_campaign(body)}
+
+
+@app.put("/api/campaigns/{campaign_id}")
+async def put_campaign(campaign_id: str, request: Request):
+    if db.get_campaign(campaign_id) is None:
+        return JSONResponse(status_code=404, content={"error": "Campaign not found"})
+    db.update_campaign(campaign_id, await request.json())
+    return db.get_campaign(campaign_id)
+
+
+@app.post("/api/campaigns/{campaign_id}/start")
+async def start_campaign(campaign_id: str):
+    """Check what can only be checked once, enqueue the list, start the worker.
+
+    The model check costs a round trip to the provider, so it happens here
+    rather than before every call: a retired model id would otherwise only
+    surface once each customer had already picked up.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if campaign is None:
+        return JSONResponse(status_code=404, content={"error": "Campaign not found"})
+    agent = db.get_agent(campaign["agent_id"])
+    if agent is None:
+        return JSONResponse(status_code=400, content={"error": "Agent no longer exists"})
+
+    error = await _check_model_available(agent)
+    if error:
+        return JSONResponse(status_code=400, content={"error": error})
+
+    added = db.materialise_targets(campaign)
+    db.set_campaign_status(campaign_id, "running")
+
+    if runner.live_worker(agent.id) is None:
+        try:
+            await runner.start(agent.id)
+        except Exception as exc:
+            db.set_campaign_status(campaign_id, "paused")
+            logger.exception("Could not start worker for campaign %s", campaign_id)
+            return JSONResponse(status_code=502, content={"error": str(exc)})
+
+    return {
+        "status": "running",
+        "queued": added,
+        "stats": db.campaign_stats(campaign_id),
+    }
+
+
+@app.post("/api/campaigns/{campaign_id}/pause")
+async def pause_campaign(campaign_id: str):
+    """Stop claiming new contacts. Calls already in progress finish."""
+    if db.get_campaign(campaign_id) is None:
+        return JSONResponse(status_code=404, content={"error": "Campaign not found"})
+    db.set_campaign_status(campaign_id, "paused")
+    return {"status": "paused", "stats": db.campaign_stats(campaign_id)}
+
+
+@app.post("/api/campaigns/{campaign_id}/stop")
+async def stop_campaign(campaign_id: str):
+    """Pause, and give up on everything still queued.
+
+    Live calls are still allowed to finish — hanging up on someone mid-sentence
+    is never what "stop the campaign" is meant to mean.
+    """
+    campaign = db.get_campaign(campaign_id)
+    if campaign is None:
+        return JSONResponse(status_code=404, content={"error": "Campaign not found"})
+    db.set_campaign_status(campaign_id, "completed")
+    cancelled = db.cancel_pending_targets(campaign_id)
+    return {"status": "completed", "cancelled": cancelled}
+
+
+@app.get("/api/campaigns/{campaign_id}/stats")
+async def get_campaign_stats(campaign_id: str):
+    campaign = db.get_campaign(campaign_id)
+    if campaign is None:
+        return JSONResponse(status_code=404, content={"error": "Campaign not found"})
+    return {
+        "campaign": campaign,
+        "stats": db.campaign_stats(campaign_id),
+        "window_open": schedule.window_open(campaign),
+        "live_calls": db.count_live_calls(campaign["agent_id"]),
+        "worker": db.get_worker(campaign["agent_id"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Suppressions
+# ---------------------------------------------------------------------------
+@app.get("/api/suppressions")
+async def get_suppressions():
+    return {"suppressions": db.list_suppressions()}
+
+
+@app.post("/api/suppressions")
+async def post_suppression(request: Request):
+    body = await request.json()
+    phone = contacts.normalise_phone(body.get("phone", ""))
+    if phone is None:
+        return JSONResponse(status_code=400, content={"error": "Not a valid phone number"})
+    return {
+        "id": db.add_suppression(phone, body.get("agent_id", ""), body.get("reason", "")),
+        "phone_e164": phone,
+    }
+
+
+@app.delete("/api/suppressions/{suppression_id}")
+async def remove_suppression(suppression_id: str):
+    db.delete_suppression(suppression_id)
+    return {"status": "deleted"}
+
+
+@app.post("/api/agents/{agent_id}/worker/start")
+async def start_worker(agent_id: str):
+    if db.get_agent(agent_id) is None:
+        return JSONResponse(status_code=404, content={"error": "Agent not found"})
+    try:
+        return await runner.start(agent_id)
+    except Exception as exc:
+        logger.exception("Could not start worker for %s", agent_id)
+        return JSONResponse(status_code=502, content={"error": str(exc)})
+
+
+@app.post("/api/agents/{agent_id}/worker/stop")
+async def stop_worker(agent_id: str):
+    await runner.stop(agent_id)
+    return {"status": "stopped"}
+
+
+@app.post("/api/internal/events")
+async def relay_worker_event(request: Request):
+    """Republish a worker's call event so the browser's SSE stream sees it.
+
+    Workers run in their own processes, but the dashboard is connected here, so
+    events have to come back to this broker. In production this is what Redis
+    pub/sub replaces.
+    """
+    body = await request.json()
+    call_id = body.get("call_id", "")
+    if call_id:
+        broker.publish(call_id, body.get("event", ""), body.get("data") or {})
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Contact lists
+# ---------------------------------------------------------------------------
+@app.post("/api/contact-lists/preview")
+async def preview_contact_list(
+    file: UploadFile = File(...), agent_id: str = Form(""),
+):
+    """Parse a CSV without storing it: headers, a few rows, a proposed mapping.
+
+    Importing is two steps on purpose. The agent's prompt already declares the
+    values every call needs, so the browser can show which column will feed
+    which `$variable` and let that be corrected — before a mis-mapped file
+    becomes a list of real numbers to dial.
+    """
+    headers, rows = contacts.parse_csv(await file.read())
+    if not headers:
+        return JSONResponse(
+            status_code=400, content={"error": "No columns found in that CSV."}
+        )
+
+    agent = db.get_agent(agent_id) if agent_id else None
+    variables = (
+        declared_variables(f"{agent.system_prompt}\n{agent.greeting_text}")
+        if agent is not None
+        else []
+    )
+    return {
+        "headers": headers,
+        "rows": rows[:5],
+        "row_count": len(rows),
+        "variables": variables,
+        "phone_column": contacts.guess_phone_column(headers),
+        "mapping": contacts.suggest_mapping(headers, variables),
+    }
+
+
+@app.post("/api/contact-lists")
+async def post_contact_list(
+    file: UploadFile = File(...),
+    name: str = Form(""),
+    phone_column: str = Form(...),
+    name_column: str = Form(""),
+    mapping: str = Form("{}"),
+):
+    headers, rows = contacts.parse_csv(await file.read())
+    if phone_column not in headers:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Column '{phone_column}' is not in that CSV."},
+        )
+    try:
+        variable_map = json.loads(mapping)
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=400, content={"error": "mapping is not valid JSON."}
+        )
+
+    parsed, rejects = contacts.build_contacts(
+        rows, phone_column, name_column, variable_map
+    )
+    if not parsed:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "No dialable numbers in that file.",
+                "rejects": rejects[:20],
+            },
+        )
+
+    list_id = db.create_contact_list(
+        name or file.filename or "Imported list", file.filename or ""
+    )
+    stored = db.insert_contacts(contacts.to_rows(parsed, list_id, db.DEFAULT_ORG))
+    # Rejects are capped: a badly formatted 10k-row file should report the
+    # problem, not return ten thousand copies of it.
+    return {
+        "id": list_id,
+        "stored": stored,
+        "rejected": len(rejects),
+        "rejects": rejects[:20],
+    }
+
+
+@app.get("/api/contact-lists")
+async def get_contact_lists():
+    return {"lists": db.list_contact_lists()}
+
+
+@app.get("/api/contact-lists/{list_id}/contacts")
+async def get_contact_list_contacts(list_id: str, limit: int = 200):
+    if db.get_contact_list(list_id) is None:
+        return JSONResponse(status_code=404, content={"error": "List not found"})
+    return {"contacts": db.list_contacts(list_id, limit)}
+
+
+@app.delete("/api/contact-lists/{list_id}")
+async def remove_contact_list(list_id: str):
+    db.delete_contact_list(list_id)
     return {"status": "deleted"}
 
 
@@ -334,61 +633,14 @@ async def initiate_call(req: CallRequest):
     if agent is None:
         return JSONResponse(status_code=404, content={"error": "Agent not found"})
 
-    twilio = db.get_credential_json("twilio")
-    if not (twilio.get("account_sid") and twilio.get("auth_token") and twilio.get("from_number")):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Twilio is not configured. Add it on the Credentials page."},
-        )
+    error = await _check_model_available(agent)
+    if error:
+        return JSONResponse(status_code=400, content={"error": error})
 
-    # Fail before dialing if a provider key is missing, rather than answering to silence.
     try:
-        for build in (registry.build_stt, registry.build_llm, registry.build_tts):
-            probe = build(agent)
-            await probe.close()
-    except MissingCredential as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
-
-    # A retired model id is indistinguishable from a working agent until the
-    # caller picks up and every turn 404s into the fallback line.
-    credential = registry.credential_key("llm", agent.llm_provider)
-    available = await _live_models(agent.llm_provider, credential) if credential else None
-    if available and agent.llm_model not in available:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": (
-                    f"'{agent.llm_model}' is not available on your {agent.llm_provider} "
-                    f"account. Edit the agent and pick one of: {', '.join(available[:8])}"
-                )
-            },
-        )
-
-    call_id = uuid.uuid4().hex[:16]
-    _remember_context(call_id, {"agent_id": agent.id, "variables": req.variables})
-    db.create_call(call_id, agent.id, req.to, req.variables)
-
-    base = settings.BASE_URL.rstrip("/")
-    try:
-        client = TwilioClient(twilio["account_sid"], twilio["auth_token"])
-        call = client.calls.create(
-            to=req.to,
-            from_=twilio["from_number"],
-            url=f"{base}/api/twilio/voice?call_id={call_id}",
-            method="POST",
-            status_callback=f"{base}/api/twilio/status",
-            status_callback_method="POST",
-            status_callback_event=["initiated", "answered", "completed"],
-        )
-    except Exception as exc:
-        CALL_CONTEXTS.pop(call_id, None)
-        db.update_call(call_id, status="failed")
-        logger.exception("Failed to initiate call")
-        return JSONResponse(status_code=502, content={"error": str(exc)})
-
-    db.update_call(call_id, call_sid=call.sid, status="dialing")
-    logger.info("Outbound call: sid=%s to=%s agent=%s", call.sid, req.to, agent.name)
-    return {"call_id": call_id, "call_sid": call.sid, "status": "dialing"}
+        return await dialer.place_call(agent, req.to, req.variables)
+    except dialer.CallError as exc:
+        return JSONResponse(status_code=exc.status, content={"error": str(exc)})
 
 
 @app.get("/api/calls")
@@ -585,77 +837,97 @@ async def twilio_status_callback(request: Request):
             fields["duration_s"] = float(form["CallDuration"])
         db.update_call(record["id"], **fields)
         broker.publish(record["id"], "status", {"status": status})
+        _settle_campaign_target(record, status, form.get("AnsweredBy", ""))
     return Response(status_code=204)
+
+
+# Statuses that mean nobody was reached. Worth trying again later; the campaign's
+# attempt budget decides how many times.
+RETRYABLE_STATUSES = {"no-answer", "busy", "failed", "canceled"}
+# Twilio's answering-machine detection. Voicemail is not a conversation, and
+# calling the same number back to reach the same voicemail is just spend.
+MACHINE_ANSWERS = {"machine_start", "machine_end_beep", "machine_end_silence",
+                   "machine_end_other", "fax"}
+
+
+def _settle_campaign_target(call: dict, status: str, answered_by: str) -> None:
+    """Close out or reschedule the campaign target this call belonged to."""
+    if status not in RETRYABLE_STATUSES and status != "completed":
+        return
+    target = db.target_by_call(call["id"])
+    if target is None:
+        return
+
+    if answered_by in MACHINE_ANSWERS:
+        dialer.record_attempt(target, succeeded=True, outcome=f"voicemail ({answered_by})")
+        return
+    dialer.record_attempt(
+        target,
+        succeeded=status == "completed",
+        outcome=call.get("outcome") or status,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Twilio Media Stream WebSocket
 # ---------------------------------------------------------------------------
-def _normalize(name: str) -> str:
-    """'Call_Id', 'callId' and 'call_id' all have to mean the same thing."""
-    return "".join(ch for ch in name.lower() if ch.isalnum())
+async def proxy_media_stream(
+    websocket: WebSocket, worker: dict, first: dict, call_id: str
+) -> None:
+    """Relay Twilio's audio socket to the agent's worker, in both directions.
 
-
-def _resolve_call_context(start: dict, websocket: WebSocket) -> tuple[str, dict]:
-    """Work out which call this stream belongs to, cheapest source first.
-
-    Custom parameters are the intended channel, but they are the one part of the
-    start frame Twilio has been observed to drop, so the stream URL's query
-    string and finally the CallSid (always present) back them up. The DB is
-    consulted when the in-memory context is gone — a server restart between
-    dialing and answering used to be fatal.
+    Twilio can only be given one public URL, so a stream belonging to an agent
+    whose worker is a separate process has to be forwarded to it. In Kubernetes
+    the Service does this and the function disappears; at laptop volumes a
+    Python relay is fine.
     """
-    params = {_normalize(k): v for k, v in (start.get("customParameters") or {}).items()}
-    call_id = params.get("callid") or websocket.query_params.get("call_id", "") or ""
-
-    if call_id and call_id in CALL_CONTEXTS:
-        return call_id, CALL_CONTEXTS[call_id]
-
-    record = db.get_call(call_id) if call_id else None
-    if record is None:
-        call_sid = start.get("callSid") or ""
-        record = db.find_call_by_sid(call_sid) if call_sid else None
-        if record is not None:
-            logger.warning(
-                "Stream carried no usable call_id; recovered %s from CallSid %s",
-                record["id"],
-                call_sid,
-            )
-
-    if record is None:
-        return call_id, {}
-
+    url = f"ws://127.0.0.1:{worker['port']}/media-stream?call_id={call_id}"
     try:
-        variables = json.loads(record.get("variables") or "{}")
-    except json.JSONDecodeError:
-        variables = {}
-    context = {"agent_id": record["agent_id"], "variables": variables}
-    _remember_context(record["id"], context)
-    return record["id"], context
+        async with ws_connect(url, max_size=None) as upstream:
+            # The start frame was consumed to work out which worker to use, so
+            # replay it first — the worker reads it exactly as Twilio sent it.
+            await upstream.send(json.dumps(first))
+            await _relay_both_ways(websocket, upstream)
+    except Exception:
+        logger.exception("Proxy to worker failed for call %s", call_id)
+        with contextlib.suppress(Exception):
+            await websocket.close()
+
+
+async def _relay_both_ways(client: WebSocket, upstream) -> None:
+    async def to_worker() -> None:
+        while True:
+            await upstream.send(await client.receive_text())
+
+    async def to_twilio() -> None:
+        async for message in upstream:
+            await client.send_text(message)
+
+    tasks = [asyncio.create_task(to_worker()), asyncio.create_task(to_twilio())]
+    _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
 
 
 @app.websocket("/api/twilio/media-stream")
 async def twilio_media_stream(websocket: WebSocket):
+    """Twilio's audio socket, either handled here or handed to the agent's worker.
+
+    Twilio can only reach one public URL, so every stream arrives here whichever
+    process is meant to run it. When the agent has a Vaani worker up, this relays
+    the socket to it; otherwise the conversation runs in-process, which is what
+    keeps the single test call in the builder working with no worker at all.
+    """
     await websocket.accept()
 
-    # Twilio sends a "connected" frame before "start", so read until the start
-    # frame arrives — that is the one carrying our custom parameters.
-    first = None
-    try:
-        for _ in range(10):
-            message = json.loads(await websocket.receive_text())
-            if message.get("event") == "start":
-                first = message
-                break
-    except Exception:
-        first = None
-
+    first = await dialer.read_start_frame(websocket)
     if first is None:
         logger.error("No start frame on media stream — closing")
         await websocket.close()
         return
 
-    call_id, context = _resolve_call_context(first["start"], websocket)
+    call_id, context = dialer.resolve_call_context(first["start"], websocket)
     agent = db.get_agent(context.get("agent_id", "")) if context else None
     if agent is None:
         logger.error(
@@ -666,49 +938,13 @@ async def twilio_media_stream(websocket: WebSocket):
         await websocket.close()
         return
 
-    try:
-        stt = registry.build_stt(agent)
-        tts = registry.build_tts(agent)
-        llm = registry.build_llm(agent)
-    except MissingCredential:
-        logger.exception("Missing credential at stream time")
-        await websocket.close()
+    worker = runner.live_worker(agent.id)
+    if worker is not None:
+        await proxy_media_stream(websocket, worker, first, call_id)
         return
 
-    system_prompt = build_system_prompt(agent.system_prompt, context.get("variables"))
-    # A static greeting is authored with the same $placeholders as the prompt, so
-    # it has to be rendered too — otherwise the caller is greeted by name as
-    # "$customer_name".
-    if agent.greeting_text:
-        agent.greeting_text = render(agent.greeting_text, context.get("variables"))
-    dialog = DialogEngine(
-        llm,
-        system_prompt,
-        temperature=agent.temperature,
-        max_output_tokens=agent.max_output_tokens,
-        on_event=lambda name, data: broker.publish(call_id, name, data),
-    )
-
-    fillers = None
-    if agent.fillers_enabled:
-        languages = [agent.language] + (["en-IN"] if agent.language != "en-IN" else ["hi-IN"])
-        fillers = FillerController(FillerBank(tts, languages), enabled=True)
-
-    session = CallSession(
-        websocket,
-        agent=agent,
-        stt=stt,
-        tts=tts,
-        dialog=dialog,
-        fillers=fillers,
-        call_id=call_id,
-        logs_dir=settings.LOGS_DIR,
-        twilio_creds=db.get_credential_json("twilio"),
-    )
-
     try:
-        await session._on_start(first["start"])
-        await session.handle()
+        await dialer.run_session(websocket, first["start"], call_id, agent, context)
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception:

@@ -475,3 +475,23 @@ label.check input { width: auto; margin: 0; }
   .facts { grid-template-columns: 1fr; gap: 2px 0; }
   .facts dd { margin-bottom: 8px; }
 }
+
+/* ---------- campaigns & contacts ---------- */
+.days { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; }
+.days legend { font-size: 12px; color: var(--muted); padding: 0 6px; }
+.days label { display: inline-flex; align-items: center; gap: 6px; margin: 0 14px 0 0; color: var(--text); }
+.days input { width: auto; margin: 0; }
+
+/* Progress reads left to right in the order a contact moves through:
+   done and failed are settled, dialing is happening now, pending is the rest. */
+.progress { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--border); margin: 12px 0 8px; }
+.progress span { display: block; height: 100%; }
+.progress .done { background: #22a06b; }
+.progress .dialing { background: #d99e18; }
+.progress .failed { background: #c0563f; }
+.progress .suppressed, .progress .cancelled { background: var(--muted); opacity: .5; }
+
+.campaign-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.campaign-stats { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.campaign-stats b { color: var(--text); }
+.var-map { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 4px 0 12px; }

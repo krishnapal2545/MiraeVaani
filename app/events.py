@@ -8,6 +8,7 @@ instead of only after the call ends.
 import asyncio
 import logging
 from collections import defaultdict
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,12 @@ MAX_QUEUE = 200
 class EventBroker:
     def __init__(self) -> None:
         self._subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        # A Vaani worker sets this to forward everything to the management app,
+        # because that is where the browser's SSE connection actually lives.
+        # Leaving publishers talking to their own local broker keeps the
+        # difference between running in-process and running in a worker out of
+        # the call path entirely.
+        self.sink: Callable[[str, str, dict], None] | None = None
 
     def subscribe(self, call_id: str) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_QUEUE)
@@ -34,6 +41,11 @@ class EventBroker:
 
     def publish(self, call_id: str, event: str, data: dict) -> None:
         """Fire-and-forget. A slow browser must never stall a live call."""
+        if self.sink is not None:
+            try:
+                self.sink(call_id, event, data)
+            except Exception:
+                logger.debug("Event sink failed for %s", call_id, exc_info=True)
         payload = {"event": event, **data}
         for queue in list(self._subscribers.get(call_id, [])):
             try:

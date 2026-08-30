@@ -30,7 +30,12 @@ function toast(message, isError = false) {
 /* The builder and the call screen belong to one agent, so the sidebar swaps
    from the product nav to that agent's own sections while they are open. */
 const AGENT_VIEWS = new Set(["builder", "call"]);
-const CRUMB_FOR_VIEW = { agents: "Agents", credentials: "Settings" };
+const CRUMB_FOR_VIEW = {
+  agents: "Agents",
+  credentials: "Settings",
+  contacts: "Contacts",
+  campaigns: "Campaigns",
+};
 
 function show(view) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
@@ -48,6 +53,11 @@ function show(view) {
   if (!inAgent) $("crumb").textContent = CRUMB_FOR_VIEW[view] || "";
 
   if (view === "credentials") loadCredentials();
+  if (view === "contacts") loadContactLists();
+  if (view === "campaigns") loadCampaigns();
+  // Campaign progress is only worth polling while it is on screen.
+  stopCampaignPolling();
+  if (view === "campaigns") startCampaignPolling();
 }
 
 document.querySelectorAll(".nav-item[data-view]").forEach((tab) =>
@@ -309,6 +319,8 @@ function formToAgent() {
     no_reply_seconds: numOr("f-no-reply", 6.0),
     no_reply_prompts: numOr("f-no-reply-prompts", 2, true),
     redirect_number: $("f-redirect").value.trim(),
+    max_concurrent_calls: numOr("f-max-concurrent", 20, true),
+    outcome_webhook_url: $("f-webhook").value.trim(),
   };
 }
 
@@ -361,6 +373,8 @@ function agentToForm(a) {
   $("f-no-reply").value = a.no_reply_seconds;
   $("f-no-reply-prompts").value = a.no_reply_prompts;
   $("f-redirect").value = a.redirect_number || "";
+  $("f-max-concurrent").value = a.max_concurrent_calls ?? 20;
+  $("f-webhook").value = a.outcome_webhook_url || "";
   refreshPromptVars();
 }
 
@@ -378,6 +392,8 @@ const DEFAULT_AGENT = {
   noise_margin: 2.0, barge_in_seconds: 0.5, barge_in_grace_seconds: 0.7,
   no_reply_seconds: 6.0, no_reply_prompts: 2,
   redirect_number: "",
+  max_concurrent_calls: 20,
+  outcome_webhook_url: "",
 };
 
 async function openBuilder(agentId, pane = "prompt") {
@@ -1053,10 +1069,311 @@ $("test-credentials").onclick = async (event) => {
 };
 
 /* ------------------------------------------------------------------ */
+/* contacts — CSV upload and column mapping                            */
+/* ------------------------------------------------------------------ */
+let CSV_FILE = null;      // the chosen file, held between preview and import
+let CSV_PREVIEW = null;   // what the server parsed out of it
+
+async function loadContactLists() {
+  try {
+    const { lists } = await api("/api/contact-lists");
+    const body = $("lists-body");
+    body.innerHTML = "";
+    $("lists-empty").classList.toggle("hidden", lists.length > 0);
+    lists.forEach((l) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><b>${escapeHtml(l.name)}</b></td>
+        <td>${escapeHtml(l.source_filename || "—")}</td>
+        <td>${l.contact_count}</td>
+        <td>${fmtWhen(l.created_at)}</td>
+        <td class="row-open"><button class="btn ghost small">Delete</button></td>`;
+      tr.querySelector("button").onclick = async () => {
+        if (!confirm(`Delete "${l.name}" and its ${l.contact_count} contacts?`)) return;
+        await api(`/api/contact-lists/${l.id}`, { method: "DELETE" });
+        toast("List deleted");
+        loadContactLists();
+      };
+      body.appendChild(tr);
+    });
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+$("upload-csv").onclick = () => $("csv-file").click();
+$("csv-cancel").onclick = () => {
+  $("csv-mapping").classList.add("hidden");
+  CSV_FILE = null;
+  $("csv-file").value = "";
+};
+
+$("csv-file").onchange = async (event) => {
+  CSV_FILE = event.target.files[0];
+  if (!CSV_FILE) return;
+  await previewCsv();
+};
+
+/* Re-previewed when the agent changes, because the variables the prompt
+   declares are what the columns are being mapped onto. */
+$("csv-agent").onchange = () => CSV_FILE && previewCsv();
+
+async function previewCsv() {
+  const form = new FormData();
+  form.append("file", CSV_FILE);
+  form.append("agent_id", $("csv-agent").value);
+  try {
+    const res = await fetch("/api/contact-lists/preview", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not read that CSV");
+    CSV_PREVIEW = data;
+    renderCsvMapping(data);
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function renderCsvMapping(data) {
+  $("csv-mapping").classList.remove("hidden");
+  $("csv-summary").textContent =
+    `${CSV_FILE.name} — ${data.row_count} rows, ${data.headers.length} columns`;
+  if (!$("csv-name").value) $("csv-name").value = CSV_FILE.name.replace(/\.csv$/i, "");
+
+  const options = (selected) =>
+    data.headers
+      .map((h) => `<option value="${escapeHtml(h)}"${h === selected ? " selected" : ""}>${escapeHtml(h)}</option>`)
+      .join("");
+  $("csv-phone").innerHTML = options(data.phone_column);
+  $("csv-namecol").innerHTML =
+    `<option value="">— none —</option>` + options(data.mapping.customer_name || "");
+
+  // One row per $variable the agent's prompt declares, pre-filled with the
+  // column whose name matches. Nothing to map is worth saying out loud.
+  const vars = $("csv-vars");
+  if (!data.variables.length) {
+    vars.innerHTML = `<p class="note">${
+      $("csv-agent").value
+        ? "This agent's prompt declares no $variables, so only the number and name are needed."
+        : "Pick an agent above to map columns onto the variables its prompt uses."
+    }</p>`;
+    return;
+  }
+  vars.innerHTML =
+    `<p class="note">Your agent's prompt asks for these. Each one is filled per contact from the column you pick.</p>
+     <div class="var-map">` +
+    data.variables
+      .map(
+        (v) => `<label>$${escapeHtml(v)}
+          <select data-var="${escapeHtml(v)}">
+            <option value="">— leave blank —</option>${options(data.mapping[v] || "")}
+          </select></label>`
+      )
+      .join("") +
+    `</div>`;
+}
+
+$("csv-import").onclick = async (event) => {
+  if (!CSV_FILE) return;
+  const button = event.currentTarget;
+  const mapping = {};
+  document.querySelectorAll("#csv-vars select[data-var]").forEach((s) => {
+    if (s.value) mapping[s.dataset.var] = s.value;
+  });
+
+  const form = new FormData();
+  form.append("file", CSV_FILE);
+  form.append("name", $("csv-name").value.trim());
+  form.append("phone_column", $("csv-phone").value);
+  form.append("name_column", $("csv-namecol").value);
+  form.append("mapping", JSON.stringify(mapping));
+
+  button.disabled = true;
+  try {
+    const res = await fetch("/api/contact-lists", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Import failed");
+    toast(
+      `Imported ${data.stored} contacts` +
+        (data.rejected ? ` — ${data.rejected} rows skipped` : "")
+    );
+    if (data.rejects && data.rejects.length) {
+      console.info("Skipped rows:", data.rejects);
+    }
+    $("csv-cancel").click();
+    loadContactLists();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    button.disabled = false;
+  }
+};
+
+/* ------------------------------------------------------------------ */
+/* campaigns                                                           */
+/* ------------------------------------------------------------------ */
+let CAMPAIGN_TIMER = null;
+
+function startCampaignPolling() {
+  CAMPAIGN_TIMER = setInterval(loadCampaigns, 5000);
+}
+function stopCampaignPolling() {
+  if (CAMPAIGN_TIMER) clearInterval(CAMPAIGN_TIMER);
+  CAMPAIGN_TIMER = null;
+}
+
+$("new-campaign").onclick = async () => {
+  const panel = $("campaign-form");
+  panel.classList.toggle("hidden");
+  if (panel.classList.contains("hidden")) return;
+  const [{ agents }, { lists }] = await Promise.all([
+    api("/api/agents"),
+    api("/api/contact-lists"),
+  ]);
+  $("cf-agent").innerHTML = agents
+    .map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`)
+    .join("");
+  $("cf-list").innerHTML = lists
+    .map((l) => `<option value="${l.id}">${escapeHtml(l.name)} (${l.contact_count})</option>`)
+    .join("");
+  if (!lists.length) toast("Upload a contact list first", true);
+};
+
+$("cf-cancel").onclick = () => $("campaign-form").classList.add("hidden");
+
+$("cf-save").onclick = async () => {
+  const days = [...document.querySelectorAll(".cf-day:checked")].map((c) => c.value);
+  try {
+    await api("/api/campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("cf-name").value.trim() || "Untitled campaign",
+        agent_id: $("cf-agent").value,
+        list_id: $("cf-list").value,
+        timezone: $("cf-tz").value.trim() || "Asia/Kolkata",
+        window_start: $("cf-start").value,
+        window_end: $("cf-end").value,
+        days: days.join(","),
+        max_concurrent: Number($("cf-concurrent").value) || 2,
+        max_attempts: Number($("cf-attempts").value) || 3,
+        retry_after_minutes: Number($("cf-retry").value) || 120,
+      }),
+    });
+    toast("Campaign created");
+    $("campaign-form").classList.add("hidden");
+    loadCampaigns();
+  } catch (err) {
+    toast(err.message, true);
+  }
+};
+
+async function loadCampaigns() {
+  try {
+    const { campaigns } = await api("/api/campaigns");
+    const list = $("campaign-list");
+    $("campaigns-empty").classList.toggle("hidden", campaigns.length > 0);
+    const stats = await Promise.all(
+      campaigns.map((c) =>
+        api(`/api/campaigns/${c.id}/stats`).catch(() => ({ stats: {}, live_calls: 0 }))
+      )
+    );
+    list.innerHTML = "";
+    campaigns.forEach((c, i) => list.appendChild(campaignCard(c, stats[i])));
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+const TARGET_ORDER = ["done", "failed", "dialing", "suppressed", "cancelled", "pending"];
+
+function campaignCard(campaign, detail) {
+  const stats = detail.stats || {};
+  const total = Object.values(stats).reduce((a, b) => a + b, 0);
+  const settled = (stats.done || 0) + (stats.failed || 0) + (stats.cancelled || 0) + (stats.suppressed || 0);
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `
+    <div class="campaign-head">
+      <div>
+        <b>${escapeHtml(campaign.name)}</b>
+        <p class="subtitle">${escapeHtml(campaign.agent_name || "?")} → ${escapeHtml(campaign.list_name || "?")}</p>
+      </div>
+      <span class="pill ${campaign.status}">${campaign.status}</span>
+    </div>
+    <div class="progress">${
+      TARGET_ORDER.filter((k) => stats[k])
+        .map((k) => `<span class="${k}" style="width:${(stats[k] / total) * 100}%" title="${k}: ${stats[k]}"></span>`)
+        .join("")
+    }</div>
+    <div class="campaign-stats">
+      <span><b>${settled}</b> of <b>${total}</b> done</span>
+      <span><b>${stats.pending || 0}</b> waiting</span>
+      <span><b>${detail.live_calls || 0}</b> on a call now</span>
+      <span>${campaign.window_start}–${campaign.window_end} ${escapeHtml(campaign.timezone)}</span>
+      <span>${detail.window_open ? "window open" : "outside calling hours"}</span>
+      <span>${workerLabel(detail.worker)}</span>
+    </div>
+    <div class="row-gap"></div>`;
+
+  const actions = card.querySelector(".row-gap");
+  const running = campaign.status === "running";
+  actions.appendChild(
+    button(running ? "Pause" : "Start", running ? "ghost" : "primary", async () => {
+      await api(`/api/campaigns/${campaign.id}/${running ? "pause" : "start"}`, { method: "POST" });
+      toast(running ? "Paused — calls in progress will finish" : "Campaign started");
+      loadCampaigns();
+    })
+  );
+  if (campaign.status !== "completed") {
+    actions.appendChild(
+      button("Stop", "ghost", async () => {
+        if (!confirm("Stop this campaign? Everything still queued is cancelled. Calls already in progress will finish.")) return;
+        const r = await api(`/api/campaigns/${campaign.id}/stop`, { method: "POST" });
+        toast(`Stopped — ${r.cancelled} contacts cancelled`);
+        loadCampaigns();
+      })
+    );
+  }
+  return card;
+}
+
+function workerLabel(worker) {
+  if (!worker || worker.status === "stopped") return "worker stopped";
+  return `worker ${worker.status}`;
+}
+
+function button(label, variant, onClick) {
+  const el = document.createElement("button");
+  el.className = `btn ${variant} small`;
+  el.textContent = label;
+  el.onclick = async () => {
+    el.disabled = true;
+    try {
+      await onClick();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      el.disabled = false;
+    }
+  };
+  return el;
+}
+
+function escapeHtml(value) {
+  const el = document.createElement("div");
+  el.textContent = value == null ? "" : String(value);
+  return el.innerHTML;
+}
+
+/* ------------------------------------------------------------------ */
 (async function init() {
   try {
     await loadCatalog();
     await loadAgents();
+    const { agents } = await api("/api/agents");
+    $("csv-agent").innerHTML =
+      `<option value="">— any agent —</option>` +
+      agents.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");
   } catch (err) {
     toast(err.message, true);
   }
