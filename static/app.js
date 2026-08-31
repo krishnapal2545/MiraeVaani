@@ -144,6 +144,36 @@ function refreshVoices(selected) {
   $("tts-note").textContent = entry ? entry.note : "";
 }
 
+// One language setting drives both halves of the pipeline, so only what the
+// chosen STT and the chosen TTS can *both* do is offerable. Smallest is the
+// case that matters: it speaks all eleven languages and hears two.
+function refreshLanguages(language, allowedCsv) {
+  const stt = entryFor("stt", $("f-stt-provider").value);
+  const tts = entryFor("tts", $("f-tts-provider").value);
+  const spoken = tts ? tts.languages : [];
+  const usable = new Set((stt ? stt.languages : []).filter((c) => spoken.includes(c)));
+  const items = CATALOG.languages.filter((l) => usable.has(l.code));
+
+  // Refilling drops the selection, and a language the new pair cannot do must
+  // not survive — so read the current choices first and re-apply what is left.
+  const keptLanguage = language !== undefined ? language : $("f-language").value;
+  const keptAllowed = allowedCsv !== undefined
+    ? allowedCsv
+    : selectedValues("f-allowed-languages").join(",");
+
+  fillSelect($("f-language"), items, "code", "name");
+  if (usable.has(keptLanguage)) $("f-language").value = keptLanguage;
+  fillSelect($("f-allowed-languages"), items, "code", "name");
+  setSelectedValues("f-allowed-languages", keptAllowed);
+
+  const dropped = keptLanguage && !usable.has(keptLanguage);
+  $("language-note").textContent = !items.length
+    ? "These two providers have no language in common — pick a different pair."
+    : dropped
+      ? `This pair cannot do ${keptLanguage}. Pick one of the languages listed.`
+      : "";
+}
+
 function refreshPromptVars() {
   const matches = ($("f-prompt").value.match(/\$\{?([a-zA-Z_][a-zA-Z0-9_]*)\}?/g) || [])
     .map((m) => m.replace(/[${}]/g, ""));
@@ -157,9 +187,6 @@ async function loadCatalog() {
   fillSelect($("f-stt-provider"), CATALOG.stt, "provider", "label");
   fillSelect($("f-llm-provider"), CATALOG.llm, "provider", "label");
   fillSelect($("f-tts-provider"), CATALOG.tts, "provider", "label");
-  fillSelect($("f-language"), CATALOG.languages, "code", "name");
-  fillSelect($("f-allowed-languages"), CATALOG.languages, "code", "name");
-
   const starter = $("f-starter");
   starter.innerHTML = '<option value="">— template —</option>';
   CATALOG.starters.forEach((s) => {
@@ -172,11 +199,18 @@ async function loadCatalog() {
   refreshSttModels();
   refreshLlmModels();
   refreshVoices();
+  refreshLanguages();
 }
 
-$("f-stt-provider").addEventListener("change", () => refreshSttModels());
+$("f-stt-provider").addEventListener("change", () => {
+  refreshSttModels();
+  refreshLanguages();
+});
 $("f-llm-provider").addEventListener("change", () => refreshLlmModels());
-$("f-tts-provider").addEventListener("change", () => refreshVoices());
+$("f-tts-provider").addEventListener("change", () => {
+  refreshVoices();
+  refreshLanguages();
+});
 $("f-prompt").addEventListener("input", refreshPromptVars);
 /* The name is now the workspace title, so the sidebar badge and the breadcrumb
    directly above it would otherwise disagree with it until the agent is saved. */
@@ -393,17 +427,18 @@ function agentToForm(a) {
   $("f-name").value = a.name || "";
   $("f-stt-provider").value = a.stt_provider;
   refreshSttModels(a.stt_model);
+  $("f-tts-provider").value = a.tts_provider;
+  refreshVoices(a.tts_voice);
   $("f-language-mode").value = a.language_mode;
-  $("f-language").value = a.language;
-  setSelectedValues("f-allowed-languages", a.allowed_languages);
+  // Both providers have to be set first: the language list is the intersection
+  // of what the two of them support.
+  refreshLanguages(a.language, a.allowed_languages);
   $("f-lang-switch-turns").value = a.language_switch_turns;
   $("f-lang-switch-secs").value = a.language_switch_min_seconds;
   $("f-llm-provider").value = a.llm_provider;
   refreshLlmModels(a.llm_model);
   $("f-temperature").value = a.temperature;
   $("f-max-tokens").value = a.max_output_tokens;
-  $("f-tts-provider").value = a.tts_provider;
-  refreshVoices(a.tts_voice);
   $("f-tts-rate").value = a.tts_speaking_rate;
   $("f-tts-pitch").value = a.tts_pitch;
   $("f-tts-pause").value = a.tts_pause_ms;

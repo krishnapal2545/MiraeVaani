@@ -43,6 +43,8 @@ LANGUAGES = [
     {"code": "od-IN", "name": "Odia"},
 ]
 
+ALL_LANGUAGES = [lang["code"] for lang in LANGUAGES]
+
 CATALOG: dict[str, list[dict[str, Any]]] = {
     "stt": [
         {
@@ -51,6 +53,7 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "credential": "sarvam",
             "models": ["saarika:v2.5", "saarika:v2", "saarika:v1"],
             "auto_detect": True,
+            "languages": ALL_LANGUAGES,
             "note": "Auto-detects 22 Indian languages, handles code-mixing.",
         },
         {
@@ -58,8 +61,14 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "label": "Smallest.ai Pulse",
             "credential": "smallest",
             "models": ["pulse"],
-            "auto_detect": True,
-            "note": "Falls back to the 'multi-asian' aggregator when no language is fixed.",
+            # Pulse reports no detected language, so auto mode never switches
+            # on it — see `providers/stt_smallest.py`.
+            "auto_detect": False,
+            "languages": ["hi-IN", "en-IN"],
+            "note": (
+                "Hindi and English only. Other languages go to the 'multi-asian' "
+                "aggregator, and it never reports which one it heard."
+            ),
         },
         {
             "provider": "google",
@@ -67,6 +76,7 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "credential": "google",
             "models": ["latest_short", "latest_long", "default"],
             "auto_detect": False,
+            "languages": ALL_LANGUAGES,
             "note": "Needs a GCP project with Speech-to-Text enabled and billing on.",
         },
     ],
@@ -107,13 +117,15 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             # Fallback only — /api/catalog replaces this with the account's own
             # voices, which is where Pro-tier and cloned voices appear.
             "voices": SMALLEST_VOICES,
-            "note": "Returns 8kHz mu-law directly — nothing to decode. No pitch control.",
+            "languages": ALL_LANGUAGES,
+            "note": "Streams 8kHz mu-law — nothing to decode, ~100ms to first audio. No pitch control.",
         },
         {
             "provider": "sarvam",
             "label": "Sarvam Bulbul",
             "credential": "sarvam",
             "voices": SARVAM_VOICES,
+            "languages": ALL_LANGUAGES,
             "note": "Returns 8kHz WAV directly — no MP3 decode, lowest latency.",
         },
         {
@@ -121,6 +133,7 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "label": "Bhashini AI",
             "credential": "bhashini",
             "voices": BHASHINI_VOICES,
+            "languages": ALL_LANGUAGES,
             "note": "Returns MP3; decoded off the event loop.",
         },
         {
@@ -128,7 +141,10 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "label": "Google Text-to-Speech",
             "credential": "google",
             "voices": GOOGLE_VOICES,
-            "note": "Wavenet/Neural2 voices. Needs Text-to-Speech enabled in GCP.",
+            # No Odia voice ships in the catalog, so the language cannot be
+            # spoken even though Google's STT can hear it.
+            "languages": [c for c in ALL_LANGUAGES if c != "od-IN"],
+            "note": "Wavenet/Neural2 voices. Needs Text-to-Speech enabled in GCP. No Odia voice.",
         },
     ],
 }
@@ -195,6 +211,21 @@ def build_llm(agent: AgentConfig) -> LLMProvider:
     if agent.llm_provider == "xai":
         return XaiLLM(api_key=key, model=agent.llm_model)
     return GeminiLLM(api_key=key, model=agent.llm_model)
+
+
+def supported_languages(stt_provider: str, tts_provider: str) -> list[str]:
+    """Languages both halves of the pipeline can actually handle.
+
+    An agent has one language setting driving both, so anything only one side
+    supports is unusable: Smallest speaks all eleven but its STT hears two, and
+    an agent configured that way talks fluently and understands nothing.
+    """
+    def codes(kind: str, provider: str) -> set[str]:
+        entry = next((e for e in CATALOG[kind] if e["provider"] == provider), None)
+        return set(entry["languages"]) if entry else set()
+
+    usable = codes("stt", stt_provider) & codes("tts", tts_provider)
+    return [code for code in ALL_LANGUAGES if code in usable]
 
 
 def voices_for(provider: str) -> list[dict[str, Any]]:

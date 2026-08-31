@@ -311,8 +311,35 @@ async def get_agents():
     return {"agents": db.list_agents()}
 
 
+def _language_error(agent: AgentConfig) -> str:
+    """Why this agent's languages cannot work on the providers it names.
+
+    Saving an unsupported pair silently is what produced a Smallest agent that
+    spoke Tamil and transcribed nothing for a whole call, so the save is refused
+    rather than quietly narrowed.
+    """
+    usable = registry.supported_languages(agent.stt_provider, agent.tts_provider)
+    wanted = [agent.language, *agent.allowed_languages.split(",")]
+    unusable = [
+        code for code in dict.fromkeys(c.strip() for c in wanted)
+        if code and code not in usable
+    ]
+    if not unusable:
+        return ""
+    names = {lang["code"]: lang["name"] for lang in registry.LANGUAGES}
+    return (
+        f"{', '.join(names.get(c, c) for c in unusable)} cannot be used with "
+        f"{agent.stt_provider} speech-to-text and {agent.tts_provider} "
+        f"text-to-speech. Supported: "
+        f"{', '.join(names.get(c, c) for c in usable) or 'nothing in common'}."
+    )
+
+
 @app.post("/api/agents")
 async def post_agent(agent: AgentConfig):
+    error = _language_error(agent)
+    if error:
+        return JSONResponse(status_code=400, content={"error": error})
     return db.create_agent(agent).model_dump()
 
 
@@ -333,6 +360,9 @@ async def get_agent(agent_id: str):
 
 @app.put("/api/agents/{agent_id}")
 async def put_agent(agent_id: str, agent: AgentConfig):
+    error = _language_error(agent)
+    if error:
+        return JSONResponse(status_code=400, content={"error": error})
     updated = db.update_agent(agent_id, agent)
     if updated is None:
         return JSONResponse(status_code=404, content={"error": "Agent not found"})
