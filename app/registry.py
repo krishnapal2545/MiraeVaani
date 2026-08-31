@@ -85,8 +85,13 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "provider": "gemini",
             "label": "Google Gemini",
             "credential": "gemini",
-            "models": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"],
-            "note": "Thinking disabled for call latency.",
+            # Fallback only — /api/catalog replaces this with the account's own
+            # list. The 2.5-lite and 2.0 ids that used to be here are retired.
+            "models": ["gemini-3.5-flash", "gemini-2.5-flash"],
+            "note": (
+                "Thinking disabled for call latency. Measured 1.2-1.5s per turn "
+                "on Hindi replies — the slowest option in this catalog."
+            ),
         },
         {
             "provider": "groq",
@@ -95,7 +100,11 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             # Fallback only — /api/catalog replaces this with the account's own
             # list. The llama-3.x ids that used to be here have been retired.
             "models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "groq/compound-mini"],
-            "note": "Fastest time-to-first-token in the catalog. Key starts 'gsk_'.",
+            "note": (
+                "Fastest in the catalog — gpt-oss-20b measured ~470ms per Hindi "
+                "turn against 1.5s for Gemini. Key starts 'gsk_'. Note "
+                "compound-mini has no tool support, so outcomes never record."
+            ),
         },
         {
             "provider": "xai",

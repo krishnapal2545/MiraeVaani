@@ -34,7 +34,11 @@ class AgentConfig(BaseModel):
 
     # --- LLM ---
     llm_provider: str = "gemini"
-    llm_model: str = "gemini-2.5-flash-lite"
+    # gemini-2.5-flash-lite was retired and 404s for accounts that had not
+    # already used it, so every new agent built on the default failed on every
+    # turn. Groq is measurably faster than any Gemini here (see the catalog
+    # note) but needs its own key, which a fresh install may not have.
+    llm_model: str = "gemini-3.5-flash"
     temperature: float = 0.4
     # Devanagari costs roughly a token per character on every tokenizer here,
     # and a reasoning model spends part of the budget before it writes a word.
