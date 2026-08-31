@@ -16,9 +16,11 @@ from app.providers.llm_groq import GroqLLM
 from app.providers.llm_xai import XaiLLM
 from app.providers.stt_google import GoogleSTT
 from app.providers.stt_sarvam import SarvamSTT
+from app.providers.stt_smallest import SmallestSTT
 from app.providers.tts_bhashini import VOICES as BHASHINI_VOICES, BhashiniTTS
 from app.providers.tts_google import VOICES as GOOGLE_VOICES, GoogleTTS
 from app.providers.tts_sarvam import VOICES as SARVAM_VOICES, SarvamTTS
+from app.providers.tts_smallest import VOICES as SMALLEST_VOICES, SmallestTTS
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,14 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
             "models": ["saarika:v2.5", "saarika:v2", "saarika:v1"],
             "auto_detect": True,
             "note": "Auto-detects 22 Indian languages, handles code-mixing.",
+        },
+        {
+            "provider": "smallest",
+            "label": "Smallest.ai Pulse",
+            "credential": "smallest",
+            "models": ["pulse"],
+            "auto_detect": True,
+            "note": "Falls back to the 'multi-asian' aggregator when no language is fixed.",
         },
         {
             "provider": "google",
@@ -90,6 +100,15 @@ CATALOG: dict[str, list[dict[str, Any]]] = {
         },
     ],
     "tts": [
+        {
+            "provider": "smallest",
+            "label": "Smallest.ai Lightning",
+            "credential": "smallest",
+            # Fallback only — /api/catalog replaces this with the account's own
+            # voices, which is where Pro-tier and cloned voices appear.
+            "voices": SMALLEST_VOICES,
+            "note": "Returns 8kHz mu-law directly — nothing to decode. No pitch control.",
+        },
         {
             "provider": "sarvam",
             "label": "Sarvam Bulbul",
@@ -141,12 +160,20 @@ def build_stt(agent: AgentConfig) -> STTProvider:
     key = _credential_for("stt", agent.stt_provider)
     if agent.stt_provider == "google":
         return GoogleSTT(api_key=key, model=agent.stt_model)
+    if agent.stt_provider == "smallest":
+        return SmallestSTT(api_key=key, model=agent.stt_model)
     return SarvamSTT(api_key=key, model=agent.stt_model)
 
 
 def build_tts(agent: AgentConfig) -> TTSProvider:
     key = _credential_for("tts", agent.tts_provider)
     fallback = agent.language
+    if agent.tts_provider == "smallest":
+        # Lightning has no pitch parameter, so tts_pitch is not passed on.
+        return SmallestTTS(
+            api_key=key, voice=agent.tts_voice, fallback_language=fallback,
+            speaking_rate=agent.tts_speaking_rate,
+        )
     if agent.tts_provider == "sarvam":
         return SarvamTTS(
             api_key=key, voice=agent.tts_voice, fallback_language=fallback,
@@ -178,6 +205,7 @@ def voices_for(provider: str) -> list[dict[str, Any]]:
 def credential_slots() -> list[dict[str, str]]:
     """Every credential the UI should offer a field for."""
     return [
+        {"key": "smallest", "label": "Smallest.ai", "hint": "One key for Pulse STT and Lightning TTS"},
         {"key": "sarvam", "label": "Sarvam AI", "hint": "Used for both Saarika STT and Bulbul TTS"},
         {"key": "bhashini", "label": "Bhashini AI", "hint": "TTS only"},
         {"key": "google", "label": "Google Cloud", "hint": "API key for Speech-to-Text and Text-to-Speech"},

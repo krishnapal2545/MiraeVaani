@@ -2,17 +2,19 @@
    Light is the default; [data-theme="dark"] only overrides the variables, so
    every rule below is written once and works in both themes.               */
 :root {
-  --bg: #f5f6f8;
+  --bg: #f6f5fa;
   --surface: #ffffff;
-  --surface-2: #f1f3f6;
-  --border: #e4e7ec;
-  --border-strong: #d3d8e0;
-  --text: #14181f;
-  --muted: #697386;
-  --accent: #0d9488;
-  --accent-dim: #0b7c72;
-  --accent-soft: rgba(13, 148, 136, 0.10);
-  --accent-text: #0b7c72;
+  --surface-2: #f3f1f9;
+  --border: #e7e4f0;
+  --border-strong: #d6d1e6;
+  --text: #17151f;
+  --muted: #6b6880;
+  /* Lavender, sitting between the blue and the purple in the logo mark. */
+  --accent: #6d5ae0;
+  --accent-dim: #5b48cc;
+  --accent-soft: rgba(109, 90, 224, 0.10);
+  --accent-fill: rgba(109, 90, 224, 0.20);
+  --accent-text: #5b48cc;
   --good: #15803d;
   --warn: #b45309;
   --bad: #b91c1c;
@@ -24,17 +26,18 @@
 }
 
 [data-theme="dark"] {
-  --bg: #0e1116;
-  --surface: #161b23;
-  --surface-2: #1c2230;
-  --border: #262d3a;
-  --border-strong: #333c4d;
-  --text: #e6eaf2;
-  --muted: #8b95a7;
-  --accent: #14b8a6;
-  --accent-dim: #0d9488;
-  --accent-soft: rgba(20, 184, 166, 0.14);
-  --accent-text: #5eead4;
+  --bg: #100e18;
+  --surface: #181524;
+  --surface-2: #201b30;
+  --border: #2b2540;
+  --border-strong: #3a3255;
+  --text: #e8e6f2;
+  --muted: #918da7;
+  --accent: #8b7cf6;
+  --accent-dim: #6d5ae0;
+  --accent-soft: rgba(139, 124, 246, 0.16);
+  --accent-fill: rgba(139, 124, 246, 0.28);
+  --accent-text: #c4b8fd;
   --good: #35c68a;
   --warn: #e0a33e;
   --bad: #e05c5c;
@@ -196,12 +199,53 @@ input:focus, select:focus, textarea:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-input[type="range"] { padding: 0; background: none; border: none; box-shadow: none; accent-color: var(--accent); }
+/* ---------- sliders ----------
+   A filled track with the value read out in the corner and the ends labelled,
+   so a number is legible at a glance instead of hidden in a spin box. The fill
+   is a background gradient sized by --pct, which is the only way to colour the
+   left-hand side of a range input in every browser. */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  display: block; height: 34px; margin: 0; padding: 0;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background-color: var(--surface);
+  background-image: linear-gradient(var(--accent-fill), var(--accent-fill));
+  background-size: var(--pct, 0%) 100%;
+  background-repeat: no-repeat;
+  box-shadow: none; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 4px; height: 18px;
+  border-radius: 2px; background: var(--accent); cursor: ew-resize;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 4px; height: 18px; border: none;
+  border-radius: 2px; background: var(--accent); cursor: ew-resize;
+}
+
+.range-wrap { position: relative; display: block; margin-top: 5px; }
+.range-value {
+  position: absolute; right: 11px; top: 50%; transform: translateY(-50%);
+  font-size: 12.5px; font-weight: 600; color: var(--text); pointer-events: none;
+}
+.ticks { display: flex; justify-content: space-between; margin-top: 3px; }
+.ticks i { font-style: normal; font-size: 10.5px; color: var(--muted); }
 input[type="checkbox"] { accent-color: var(--accent); }
 label.check { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: 13px; }
 label.check input { width: auto; margin: 0; }
 .inline-select { display: flex; align-items: center; gap: 8px; margin: 0; }
 .inline-select select { width: auto; margin: 0; }
+
+/* The agent's name is edited in place of the workspace title, so it reads as a
+   heading until it is hovered or focused. */
+.title-input {
+  width: auto; min-width: min(280px, 100%); max-width: 100%;
+  margin: 0 0 0 -9px; padding: 3px 8px;
+  font-size: 20px; font-weight: 600; letter-spacing: -0.01em; color: var(--text);
+  background: transparent; border-color: transparent;
+}
+.title-input:hover { border-color: var(--border); }
+.title-input:focus { background: var(--surface); }
 
 .search { position: relative; display: block; margin: 0; }
 .search svg {

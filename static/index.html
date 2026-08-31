@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MiraeVaani — Voice Agents</title>
 <link rel="icon" href="/static/images/vaani_logo.jpg">
-<link rel="stylesheet" href="/static/style.css?v=6.5.0">
+<link rel="stylesheet" href="/static/style.css?v=6.6.0">
 <script>
   /* Applied before first paint so a dark-theme reload never flashes white. */
   try {
@@ -221,7 +221,8 @@
   <section id="view-builder" class="view">
     <div class="view-head">
       <div>
-        <h2 id="builder-title">New agent</h2>
+        <input id="f-name" class="title-input" type="text" placeholder="Untitled agent"
+               aria-label="Agent name" autocomplete="off">
         <p class="subtitle" id="builder-subtitle">Configure how this agent speaks and what it says.</p>
       </div>
       <div class="row-gap">
@@ -269,54 +270,39 @@
 
         <div class="rail">
           <div class="panel">
-            <h3>Identity</h3>
-            <label>Agent name
-              <input id="f-name" type="text" placeholder="Margin shortfall caller">
-            </label>
-          </div>
-
-          <div class="panel">
             <h3>Model</h3>
             <p class="note">The language model that powers this agent.</p>
-            <label>Provider <select id="f-llm-provider"></select></label>
-            <label>Model <select id="f-llm-model"></select></label>
             <div class="two">
-              <label>Temperature <input id="f-temperature" type="number" step="0.1" min="0" max="2"></label>
-              <label>Max reply tokens <input id="f-max-tokens" type="number" min="30" max="500"></label>
+              <label>Provider <select id="f-llm-provider"></select></label>
+              <label>Model <select id="f-llm-model"></select></label>
+            </div>
+            <div class="two">
+              <label>Temperature <input id="f-temperature" type="range" step="0.1" min="0" max="2"></label>
+              <label>Max reply tokens <input id="f-max-tokens" type="range" min="30" max="500"></label>
             </div>
             <p class="note" id="llm-note"></p>
           </div>
 
           <div class="panel">
             <h3>Languages</h3>
-            <label>Mode
-              <select id="f-language-mode">
-                <option value="auto">Auto-detect per utterance</option>
-                <option value="fixed">Fixed language</option>
-              </select>
-            </label>
-            <label>Primary language <select id="f-language"></select></label>
+            <div class="two">
+              <label>Mode
+                <select id="f-language-mode">
+                  <option value="auto">Auto-detect per utterance</option>
+                  <option value="fixed">Fixed language</option>
+                </select>
+              </label>
+              <label>Primary language <select id="f-language"></select></label>
+            </div>
             <label>Allowed languages (auto mode)
-              <select id="f-allowed-languages" multiple size="5"></select>
+              <select id="f-allowed-languages" multiple size="4"></select>
             </label>
             <div class="two">
-              <label>Turns before switching <input id="f-lang-switch-turns" type="number" min="1" max="5"></label>
-              <label>Ignore clips under (s) <input id="f-lang-switch-secs" type="number" step="0.1" min="0" max="4"></label>
+              <label>Turns before switching <input id="f-lang-switch-turns" type="range" min="1" max="5"></label>
+              <label>Ignore clips under (s) <input id="f-lang-switch-secs" type="range" step="0.1" min="0" max="4"></label>
             </div>
-            <p class="note">Auto follows the caller, but only after the same language is
-              detected on consecutive turns — one bad guess on a short clip no longer
-              flips the call. Select nothing to allow every language the STT can return.</p>
-          </div>
-
-          <div class="panel">
-            <h3>Voice</h3>
-            <label>Provider <select id="f-tts-provider"></select></label>
-            <label>Voice <select id="f-tts-voice"></select></label>
-            <div class="row-gap">
-              <button class="btn ghost small" id="preview-voice">▶ Preview voice</button>
-              <span class="note inline" id="preview-status"></span>
-            </div>
-            <p class="note" id="tts-note"></p>
+            <p class="note">Auto switches only after the same language is detected on
+              consecutive turns. Select nothing to allow every language the STT returns.</p>
           </div>
         </div>
       </div>
@@ -338,7 +324,7 @@
             <input id="f-fillers" type="checkbox" checked>
             <span>Speak a short filler when the reply is slow</span>
           </label>
-          <label>Wait before filler — <b id="filler-delay-label">350</b> ms
+          <label>Wait before filler (ms)
             <input id="f-filler-delay" type="range" min="150" max="1200" step="50">
           </label>
           <p class="note">Fillers are pre-synthesized when the call starts and chosen
@@ -346,18 +332,29 @@
         </div>
 
         <div class="panel">
+          <h3>Text to speech</h3>
+          <div class="two">
+            <label>Provider <select id="f-tts-provider"></select></label>
+            <label>Voice <select id="f-tts-voice"></select></label>
+          </div>
+          <div class="row-gap">
+            <button class="btn ghost small" id="preview-voice">▶ Preview voice</button>
+            <span class="note inline" id="preview-status"></span>
+          </div>
+          <p class="note" id="tts-note"></p>
+
           <h3>Delivery</h3>
           <div class="two">
-            <label>Speaking rate <input id="f-tts-rate" type="number" step="0.05" min="0.5" max="1.6"></label>
-            <label>Pitch (semitones) <input id="f-tts-pitch" type="number" step="0.5" min="-10" max="10"></label>
+            <label>Speaking rate <input id="f-tts-rate" type="range" step="0.05" min="0.5" max="1.6"></label>
+            <label>Pitch (semitones) <input id="f-tts-pitch" type="range" step="0.5" min="-10" max="10"></label>
           </div>
           <label>Pause length for "..." (ms)
-            <input id="f-tts-pause" type="number" step="50" min="0" max="1500">
+            <input id="f-tts-pause" type="range" step="50" min="0" max="1500">
           </label>
           <p class="note">The agent writes "..." where a person would pause. Slightly
-            under 1.0 rate reads as considered rather than rushed. The voice follows the
-            language actually being spoken, not the one selected here — the Prompt tab
-            picks the voice for the agent's own language.</p>
+            under 1.0 rate reads as considered rather than rushed. The voice selected
+            here is the agent's own — spoken replies follow the language actually being
+            used on the call.</p>
         </div>
       </div>
     </div>
@@ -368,16 +365,16 @@
         <div class="panel">
           <h3>Turn detection</h3>
           <div class="two">
-            <label>Minimum threshold (RMS) <input id="f-rms" type="number" min="50" max="2000"></label>
-            <label>End of turn (s) <input id="f-silence" type="number" step="0.1" min="0.2" max="3"></label>
+            <label>Minimum threshold (RMS) <input id="f-rms" type="range" min="50" max="2000"></label>
+            <label>End of turn (s) <input id="f-silence" type="range" step="0.1" min="0.2" max="3"></label>
           </div>
           <div class="two">
-            <label>Noise margin (× room) <input id="f-noise-margin" type="number" step="0.1" min="1.1" max="6"></label>
-            <label>Min utterance (s) <input id="f-min-utterance" type="number" step="0.1" min="0.1" max="2"></label>
+            <label>Noise margin (× room) <input id="f-noise-margin" type="range" step="0.1" min="1.1" max="6"></label>
+            <label>Min utterance (s) <input id="f-min-utterance" type="range" step="0.1" min="0.1" max="2"></label>
           </div>
           <div class="two">
-            <label>Barge-in after (s) <input id="f-barge" type="number" step="0.05" min="0.1" max="2"></label>
-            <label>Barge-in grace (s) <input id="f-barge-grace" type="number" step="0.1" min="0" max="3"></label>
+            <label>Barge-in after (s) <input id="f-barge" type="range" step="0.05" min="0.1" max="2"></label>
+            <label>Barge-in grace (s) <input id="f-barge-grace" type="range" step="0.1" min="0" max="3"></label>
           </div>
           <p class="note">The live threshold tracks the room and sits this many times
             above it, so the RMS box is a floor rather than the whole rule. Raise the
@@ -388,8 +385,8 @@
         <div class="panel">
           <h3>Silence handling</h3>
           <div class="two">
-            <label>Check "can you hear me?" after (s) <input id="f-no-reply" type="number" step="0.5" min="0" max="30"></label>
-            <label>Check-ins before hanging up <input id="f-no-reply-prompts" type="number" min="1" max="5"></label>
+            <label>Check "can you hear me?" after (s) <input id="f-no-reply" type="range" step="0.5" min="0" max="30"></label>
+            <label>Check-ins before hanging up <input id="f-no-reply-prompts" type="range" min="1" max="5"></label>
           </div>
           <p class="note">When nothing comes back for the check interval the agent asks
             whether it can be heard — and if audio was heard but discarded, it asks the
@@ -402,7 +399,7 @@
 
           <h3>Campaigns</h3>
           <label>Simultaneous calls this agent may run
-            <input id="f-max-concurrent" type="number" min="1" max="50">
+            <input id="f-max-concurrent" type="range" min="1" max="50">
           </label>
           <label>Outcome webhook
             <input id="f-webhook" type="url" placeholder="https://your-system.example.com/vaani-outcome">
@@ -562,6 +559,6 @@
 </div>
 
 <div id="toast" class="toast"></div>
-<script src="/static/app.js?v=6.5.0"></script>
+<script src="/static/app.js?v=6.6.0"></script>
 </body>
 </html>

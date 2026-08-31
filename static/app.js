@@ -178,8 +178,57 @@ $("f-stt-provider").addEventListener("change", () => refreshSttModels());
 $("f-llm-provider").addEventListener("change", () => refreshLlmModels());
 $("f-tts-provider").addEventListener("change", () => refreshVoices());
 $("f-prompt").addEventListener("input", refreshPromptVars);
-$("f-filler-delay").addEventListener("input", (e) => {
-  $("filler-delay-label").textContent = e.target.value;
+/* The name is now the workspace title, so the sidebar badge and the breadcrumb
+   directly above it would otherwise disagree with it until the agent is saved. */
+$("f-name").addEventListener("input", () => {
+  const name = $("f-name").value.trim() || "New agent";
+  $("agent-nav-name").textContent = name;
+  const pane = document.querySelector("#agent-nav .nav-item.active");
+  if (pane) $("crumb").textContent = `Agents / ${name} / ${paneLabel(pane.dataset.pane)}`;
+});
+
+/* ------------------------------------------------------------------ */
+/* sliders                                                             */
+/* ------------------------------------------------------------------ */
+/* Every range input gets a value readout and end labels. Building them here
+   rather than in the markup keeps the range's own min/max the single source of
+   truth for the ticks — an edited bound cannot drift from its label. */
+function decorateRanges() {
+  document.querySelectorAll('input[type="range"]').forEach((input) => {
+    if (input.parentElement.classList.contains("range-wrap")) return;
+
+    const wrap = document.createElement("span");
+    wrap.className = "range-wrap";
+    input.parentElement.insertBefore(wrap, input);
+    wrap.appendChild(input);
+
+    const value = document.createElement("output");
+    value.className = "range-value";
+    wrap.appendChild(value);
+
+    const ticks = document.createElement("span");
+    ticks.className = "ticks";
+    ticks.innerHTML = `<i>${input.min}</i><i>${input.max}</i>`;
+    wrap.insertAdjacentElement("afterend", ticks);
+  });
+  paintRanges();
+}
+
+/* Values are also set programmatically when an agent loads, which fires no
+   input event — so the fill and the readout are repainted, never incremented. */
+function paintRanges() {
+  document.querySelectorAll('input[type="range"]').forEach((input) => {
+    const min = Number(input.min || 0);
+    const max = Number(input.max || 100);
+    const pct = max > min ? ((Number(input.value) - min) / (max - min)) * 100 : 0;
+    input.style.setProperty("--pct", `${pct}%`);
+    const value = input.parentElement.querySelector("output.range-value");
+    if (value) value.textContent = input.value;
+  });
+}
+
+document.addEventListener("input", (e) => {
+  if (e.target.type === "range") paintRanges();
 });
 $("f-starter").addEventListener("change", (e) => {
   const starter = CATALOG.starters.find((s) => s.id === e.target.value);
@@ -363,7 +412,6 @@ function agentToForm(a) {
   $("f-greeting-text").value = a.greeting_text || "";
   $("f-fillers").checked = !!a.fillers_enabled;
   $("f-filler-delay").value = a.filler_delay_ms;
-  $("filler-delay-label").textContent = a.filler_delay_ms;
   $("f-rms").value = a.silence_threshold_rms;
   $("f-silence").value = a.silence_end_seconds;
   $("f-min-utterance").value = a.min_utterance_seconds;
@@ -376,6 +424,7 @@ function agentToForm(a) {
   $("f-max-concurrent").value = a.max_concurrent_calls ?? 20;
   $("f-webhook").value = a.outcome_webhook_url || "";
   refreshPromptVars();
+  paintRanges();
 }
 
 const DEFAULT_AGENT = {
@@ -400,14 +449,12 @@ async function openBuilder(agentId, pane = "prompt") {
   EDITING = agentId || null;
   if (agentId) {
     const agent = await api(`/api/agents/${agentId}`);
-    $("builder-title").textContent = agent.name;
     $("builder-subtitle").textContent =
       `${agent.llm_provider} · ${agent.tts_provider} ${agent.tts_voice} · ` +
       (agent.language_mode === "auto" ? "auto-detect" : agent.language);
     $("agent-nav-name").textContent = agent.name;
     agentToForm(agent);
   } else {
-    $("builder-title").textContent = "New agent";
     $("builder-subtitle").textContent =
       "Configure how this agent speaks and what it says, then save it.";
     $("agent-nav-name").textContent = "New agent";
@@ -1416,6 +1463,7 @@ function escapeHtml(value) {
 
 /* ------------------------------------------------------------------ */
 (async function init() {
+  decorateRanges();
   try {
     await loadCatalog();
     await loadAgents();

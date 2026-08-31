@@ -112,6 +112,7 @@ async def health():
 # provider -> (fetched_at, model ids). Live lists keep the dropdown honest
 # without an HTTP round trip on every page load.
 _MODEL_CACHE: dict[str, tuple[float, list[str]]] = {}
+_VOICE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 MODEL_CACHE_TTL = 300.0
 
 
@@ -143,6 +144,32 @@ async def _llm_catalog() -> list[dict]:
     ]
 
 
+async def _live_voices(provider: str, credential: str) -> list[dict] | None:
+    cached = _VOICE_CACHE.get(provider)
+    if cached and (time.monotonic() - cached[0]) < MODEL_CACHE_TTL:
+        return cached[1] or None
+
+    voices = await verify.list_tts_voices(provider, db.get_credential(credential))
+    _VOICE_CACHE[provider] = (time.monotonic(), voices or [])
+    return voices
+
+
+async def _tts_catalog() -> list[dict]:
+    """Same bargain as the model lists: the account's own voices win.
+
+    Smallest.ai carries 217 voices plus whatever the account has cloned, so the
+    hardcoded list in the adapter can only ever be a starting point.
+    """
+    entries = registry.CATALOG["tts"]
+    listings = await asyncio.gather(
+        *(_live_voices(e["provider"], e["credential"]) for e in entries)
+    )
+    return [
+        {**entry, "voices": voices or entry["voices"], "voices_live": bool(voices)}
+        for entry, voices in zip(entries, listings)
+    ]
+
+
 async def _check_model_available(agent: AgentConfig) -> str:
     """The reason the agent cannot dial, or "" if it can.
 
@@ -169,7 +196,7 @@ async def get_catalog():
     return {
         "stt": registry.CATALOG["stt"],
         "llm": await _llm_catalog(),
-        "tts": registry.CATALOG["tts"],
+        "tts": await _tts_catalog(),
         "languages": registry.LANGUAGES,
         "starters": STARTER_PROMPTS,
         "credentials": [

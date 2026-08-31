@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 
+SMALLEST_API_BASE = "https://api.smallest.ai/waves/v1"
+SMALLEST_TTS_MODEL = "lightning-v3.1"
+
 OK = "ok"
 INVALID = "invalid"
 UNKNOWN = "unknown"
@@ -126,6 +129,15 @@ async def _verify_bhashini(client: httpx.AsyncClient, secret: str) -> VerifyResu
     return _classify(response, "Bhashini accepted the key.")
 
 
+async def _verify_smallest(client: httpx.AsyncClient, secret: str) -> VerifyResult:
+    """Listing voices is the cheapest authenticated call Lightning offers."""
+    response = await client.get(
+        f"{SMALLEST_API_BASE}/{SMALLEST_TTS_MODEL}/get_voices",
+        headers={"Authorization": f"Bearer {secret}"},
+    )
+    return _classify(response, "Smallest.ai accepted the key.")
+
+
 async def _verify_google(client: httpx.AsyncClient, secret: str) -> VerifyResult:
     """One key, two APIs — the call needs both, so both are probed."""
     tts = await client.get(
@@ -210,6 +222,7 @@ async def _verify_xai(client: httpx.AsyncClient, secret: str) -> VerifyResult:
 
 VERIFIERS: dict[str, Callable[[httpx.AsyncClient, str], Awaitable[VerifyResult]]] = {
     "sarvam": _verify_sarvam,
+    "smallest": _verify_smallest,
     "bhashini": _verify_bhashini,
     "google": _verify_google,
     "gemini": _verify_gemini,
@@ -387,5 +400,61 @@ async def list_llm_models(provider: str, secret: str) -> list[str] | None:
                 ])
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         logger.warning("Could not list %s models: %s", provider, exc)
+
+    return None
+
+
+def _voice_entries(body: Any) -> list[dict[str, str]]:
+    """Normalise a voice listing into the {id, name, language} the UI reads.
+
+    The field names are not published, so each candidate spelling is tried
+    rather than assumed — an unrecognised shape yields nothing and the static
+    fallback list stays in place.
+    """
+    items = body
+    if isinstance(body, dict):
+        for key in ("voices", "data", "results"):
+            if isinstance(body.get(key), list):
+                items = body[key]
+                break
+    if not isinstance(items, list):
+        return []
+
+    entries: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        voice_id = item.get("voiceId") or item.get("voice_id") or item.get("id")
+        if not voice_id:
+            continue
+        name = item.get("displayName") or item.get("name") or str(voice_id)
+        entries.append({
+            "id": str(voice_id),
+            "name": str(name).strip() or str(voice_id),
+            "language": str(item.get("language") or "multi"),
+        })
+    return sorted(entries, key=lambda v: v["name"].lower())
+
+
+async def list_tts_voices(provider: str, secret: str) -> list[dict[str, str]] | None:
+    """The account's own voices, or None if the provider will not say.
+
+    Only Smallest.ai is asked: it ships 217 voices and adds cloned and Pro-tier
+    ones per account, so a hardcoded list is guaranteed to be wrong for someone.
+    """
+    if not secret or provider != "smallest":
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            response = await client.get(
+                f"{SMALLEST_API_BASE}/{SMALLEST_TTS_MODEL}/get_voices",
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+            if response.status_code >= 300:
+                return None
+            return _voice_entries(response.json()) or None
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        logger.warning("Could not list %s voices: %s", provider, exc)
 
     return None

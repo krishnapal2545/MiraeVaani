@@ -175,6 +175,12 @@ class CallSession:
         self._filler_started = False
         self._filler_this_turn: str | None = None
 
+        # Synthesis runs ahead of playback, so it needs its own handle and its
+        # own first-byte stamp — measuring first byte at the moment it is *sent*
+        # would just re-measure how long the filler is.
+        self._synthesis_task: asyncio.Task | None = None
+        self._synth_first_byte = 0.0
+
     # ------------------------------------------------------------------
     # Event emission: disk log + live SSE + database
     # ------------------------------------------------------------------
@@ -471,13 +477,19 @@ class CallSession:
             )
             logger.info("Agent [%s]: %s", self.language, reply)
 
+            # --- TTS + streaming playback ---
+            # Synthesis starts here, ahead of the filler settling, so the wait
+            # it covers happens under the clip rather than behind it.
+            tts_hit = time.perf_counter()
+            prepared = self._start_synthesis(reply)
+
             # Cancel the filler if it never started; let it finish if it did, so
             # the two never overlap.
             await self._settle_filler()
 
-            # --- TTS + streaming playback ---
-            tts_hit = time.perf_counter()
-            await self._speak_streaming(reply, turn=turn, tts_hit=tts_hit)
+            await self._speak_streaming(
+                reply, turn=turn, tts_hit=tts_hit, prepared=prepared
+            )
             tts_done = time.perf_counter()
             tts_ms = (tts_done - tts_hit) * 1000
 
@@ -727,12 +739,50 @@ class CallSession:
                    call_language=target, spoken_language=spoken, script=script)
         return spoken
 
-    async def _speak_streaming(self, text: str, turn: int = 0, tts_hit: float = 0) -> None:
-        """Synthesize sentence-by-sentence and stream each to Twilio immediately."""
+    def _start_synthesis(self, text: str) -> tuple[str | None, asyncio.Queue]:
+        """Begin synthesizing now, into a queue, without waiting to play it.
+
+        The filler exists to cover TTS latency, but awaiting its playback before
+        calling the engine put that latency *after* the clip instead of under
+        it: the caller heard the filler, then most of a second of silence, then
+        the reply. Producing into a queue lets synthesis run while the filler is
+        still playing, so the first real audio is usually already waiting by the
+        time the filler ends.
+        """
+        language = self._voice_language_for(text)
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._synth_first_byte = 0.0
+
+        async def produce() -> None:
+            try:
+                async for chunk in self.tts.synthesize_streaming(text, language):
+                    if not self._synth_first_byte:
+                        self._synth_first_byte = time.perf_counter()
+                    await queue.put(chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Synthesis failed")
+            finally:
+                # The sentinel is what ends playback; without it a failed
+                # synthesis would leave the caller listening to an open line.
+                await queue.put(None)
+
+        self._synthesis_task = asyncio.create_task(produce())
+        return language, queue
+
+    async def _speak_streaming(
+        self,
+        text: str,
+        turn: int = 0,
+        tts_hit: float = 0,
+        prepared: tuple[str | None, asyncio.Queue] | None = None,
+    ) -> None:
+        """Stream synthesized audio to Twilio, starting as soon as it exists."""
         if not self.stream_sid or not text.strip():
             return
 
-        speak_language = self._voice_language_for(text)
+        speak_language, queue = prepared or self._start_synthesis(text)
         self._is_speaking = True
         self._speaking_since = time.perf_counter()
         self._barge_secs = 0.0
@@ -748,13 +798,23 @@ class CallSession:
         total_audio = bytearray()
         first_byte_logged = False
 
-        async for mulaw_chunk in self.tts.synthesize_streaming(text, speak_language):
+        while True:
+            mulaw_chunk = await queue.get()
+            if mulaw_chunk is None:
+                break
             if not self._is_speaking:
                 return  # interrupted
 
             if not first_byte_logged:
-                ttfb_ms = (time.perf_counter() - tts_hit) * 1000
-                self._emit("tts_first_byte", turn=turn, ttfb_ms=round(ttfb_ms))
+                # Measured to when the engine produced the byte, not to when it
+                # was sent: the two differ by however much filler was still
+                # playing, and only the first is TTS latency.
+                produced = self._synth_first_byte or time.perf_counter()
+                self._emit(
+                    "tts_first_byte",
+                    turn=turn,
+                    ttfb_ms=round((produced - tts_hit) * 1000),
+                )
                 first_byte_logged = True
 
             total_audio.extend(mulaw_chunk)
@@ -795,6 +855,11 @@ class CallSession:
         self._cancel_watchdog()
         if self._filler_task and not self._filler_task.done():
             self._filler_task.cancel()
+        # Synthesis can outlive the turn that started it, so it needs cancelling
+        # in its own right — otherwise a barge-in leaves it pulling audio for a
+        # reply nobody is going to hear.
+        if self._synthesis_task and not self._synthesis_task.done():
+            self._synthesis_task.cancel()
         if self._response_task and not self._response_task.done():
             self._response_task.cancel()
         if self.stream_sid:
